@@ -1,3 +1,5 @@
+// kayak-obs-standard.js - Standard-Anbindung OBS Studio (obs-websocket v5) fuer kayak-softframe.
+// Andere Anbindung: eigene Datei kayak-obs-NAME.js daneben legen und mit $env:KAYAK_OBS_MODULE="NAME" starten.
 // kayak-obs.js – OBS-Anbindung fuer das Kayak Soft-Frame (obs-websocket v5, ab OBS 28)
 //
 // - Beim Verbinden: Szenenliste aus OBS holen; die ersten 30 (Reihenfolge wie in der OBS-Szenenliste,
@@ -17,7 +19,7 @@
 
 const crypto = require('crypto');
 
-const URL = process.env.KAYAK_OBS_URL || 'ws://192.168.5.100:4455';
+const URL = process.env.KAYAK_OBS_URL || 'ws://192.168.5.60:4455';
 const PASS = process.env.KAYAK_OBS_PASS || '';
 const ENABLED = process.env.KAYAK_OBS !== '0';
 const MAX_SCENES = parseInt(process.env.KAYAK_OBS_SCENES || '30', 10);   // 15 Tasten x 2 (mit Shift)
@@ -224,6 +226,7 @@ function auto(newPgm, newPst, ms) {
   r.push(['TriggerStudioModeTransition']);
   st.pendingPreview = sceneOf(newPst);
   batch(r);
+  if (w) wipeDone();
 }
 function setDuration(ms) {
   st.durationMs = clampMs(ms);
@@ -427,7 +430,10 @@ const WIPES = (() => {
     return Object.assign(def, j, { patterns: Object.assign({}, j.patterns || def.patterns) });
   } catch (e) { return def; }
 })();
-const wipeState = { type: 1, pattern: { 1: 1, 2: 1 } };
+const wipeState = { type: 1, pattern: { 1: 1, 2: 1 }, rev: false, manual: false, flip: false };
+// Normal/Reverse (v5e): nach jedem Wipe wird "Umkehren" automatisch umgeschaltet -> der naechste Wipe laeuft
+// als Rueckweg (z. B. Iris auf -> Iris zu). Wechsel von Muster oder Typ beginnt wieder "normal".
+// v5v: FlipFlop jetzt am Panel (Pattern Direction); "nr" in kayak-wipes.json und KAYAK_WIPE_NR entfallen.
 function lumaFor(pat) { return WIPES.patterns[pat] || WIPES.patterns[String(pat)] || WIPES.fallback; }
 function wipeRequests() {
   if (wipeState.type !== 2 && wipeState.type !== 3) return null;
@@ -435,14 +441,36 @@ function wipeRequests() {
   const pat = wipeState.pattern[wipeState.type - 1];
   return [['SetCurrentSceneTransition', { transitionName: st.wipeName }],
           ['SetCurrentSceneTransitionSettings', { transitionSettings: { luma_image: lumaFor(pat),
-            luma_softness: WIPES.softness, luma_invert: !!WIPES.invert }, overlay: true }]];
+            luma_softness: WIPES.softness, luma_invert: !!WIPES.invert !== (wipeState.manual !== (wipeState.flip && wipeState.rev)) }, overlay: true }]];
+}
+// nach einem ausgeloesten Wipe fuer den naechsten umschalten
+function wipeDone() {
+  if (!wipeState.flip || (wipeState.type !== 2 && wipeState.type !== 3) || !st.wipeName) return;
+  wipeState.rev = !wipeState.rev;
+  log(`[OBS] Naechster Wipe: ${wipeState.rev ? 'umgekehrt (Rueckweg)' : 'normal'}`);
+}
+// Pattern Direction vom Panel (v5v): 53 00 = Normal, 53 01 = Reverse, 54 01 = FlipFlop (nach jedem Wipe automatisch Rueckweg).
+// Das Panel meldet den gewaehlten Zustand selbst, wir muessen nichts mitzaehlen.
+function wipeDirection(what, on) {
+  if (what === 'rev') { wipeState.manual = !!on; wipeState.flip = false; }
+  else { wipeState.flip = !!on; wipeState.manual = false; }
+  wipeState.rev = false;
+  log(`[OBS] Pattern Direction: ${wipeState.flip ? 'FlipFlop' : wipeState.manual ? 'Reverse' : 'Normal'}`);
+}
+// Softness-Regler vom Panel (v5v) -> luma_softness, gilt ab dem naechsten Wipe. Schritt: $env:KAYAK_SOFT_STEP (0.01)
+const SOFT_STEP = parseFloat(process.env.KAYAK_SOFT_STEP || '0.01');
+function wipeSoftness(steps) {
+  WIPES.softness = Math.max(0, Math.min(1, WIPES.softness + steps * SOFT_STEP));
+  log(`[OBS] Wipe-Softness ${Math.round(WIPES.softness * 100)} %`);
 }
 function setTransType(typ) {
+  if (typ !== wipeState.type) wipeState.rev = false;
   wipeState.type = typ;
   const n = { 1: 'Mix', 2: 'Wipe 1', 3: 'Wipe 2' }[typ] || typ;
   log(`[OBS] Transitions-Typ ${n}${typ >= 2 ? ` -> "${st.wipeName || 'kein Wipe-Uebergang!'}" mit ${lumaFor(wipeState.pattern[typ - 1])}` : ''}`);
 }
 function setWipePattern(w, pat) {
+  if (wipeState.pattern[w] !== pat) wipeState.rev = false;
   wipeState.pattern[w] = pat;
   log(`[OBS] Wipe ${w} Pattern ${pat} -> ${lumaFor(pat)}${WIPES.patterns[pat] ? '' : ' (nicht in Tabelle, Standard)'}`);
 }
@@ -583,6 +611,81 @@ async function keySwitch(i, on, ms) {
   log(`[OBS] Key${i + 1} DSK "${dsk}" ${on ? 'EIN ' + s : 'AUS'}${ms > 0 ? ` (${clampMs(ms)} ms)` : ''}`);
 }
 
+// ---- M/E1..3 -> Source Switcher (Exeldro) ----
+// Je M/E eine Source-Switcher-Quelle (Standard "M_E1_PGM".."M_E3_PGM", Muster $env:KAYAK_ME_SW).
+// Taste mit Szenen-Nr. n (wie P/P: 1..24 + Shift-Extras 25..30) -> n-te Quelle in der Liste des Switchers.
+// Umgeschaltet wird ueber das Tastenkuerzel, das der Switcher je Quelle anlegt (TriggerHotkeyByName mit contextName).
+const ME_SW = process.env.KAYAK_ME_SW || 'M_E{n}_PGM';  // v5s: Namen wie in Thomas' OBS
+const ME_BLOCK = parseInt(process.env.KAYAK_ME_BLOCK || '30', 10); // Szenen je M/E
+function meSwitcher(me) { return ME_SW.split('{n}').join(String(me)); }
+const meTrans = {};      // M/E -> Uebergang, den der Nutzer im Switcher eingestellt hat (fuer AUTO)
+const meTransNow = {};   // M/E -> zuletzt von uns gesetzter Uebergang
+async function meSources(me) {
+  const r = await requestRaw('GetInputSettings', { inputName: meSwitcher(me) });
+  if (!r.ok) { log(`[M/E] Source Switcher "${meSwitcher(me)}" nicht gefunden (${r.comment || ''})`); return null; }
+  const set = (r.data && r.data.inputSettings) || {};
+  if (!(me in meTrans)) {
+    const t = set.transition && set.transition !== 'cut_transition' ? set.transition : 'fade_transition';
+    meTrans[me] = t; meTransNow[me] = set.transition || '';
+    log(`[M/E] ${meSwitcher(me)}: Uebergang fuer AUTO = ${t}`);
+  }
+  const arr = set.sources || [];
+  return arr.map(x => (x && typeof x === 'object') ? x.value : x).filter(Boolean);
+}
+// n = Tastennummer 1..30 -> Quelle im Switcher (Szene me*30+n, sonst n-te Quelle der Liste)
+async function meTarget(me, n) {
+  const list = await meSources(me); if (!list) return null;
+  // v5t: Taste n -> n-te Quelle in der Liste des Switchers (Reihenfolge in OBS = Tastenbelegung)
+  const N = me * ME_BLOCK + n, src = list[n - 1];
+  if (!src) { log(`[M/E] M/E${me}: Taste ${n} - "${meSwitcher(me)}" hat nur ${list.length} Quellen`); return null; }
+  return { src, N };
+}
+// mode 'cut' = harter Schnitt, 'auto' = Uebergang des Switchers mit Dauer ms
+async function meSwitch(me, n, mode, ms, what) {
+  if (!ready) { log(`[M/E] OBS nicht verbunden - M/E${me} nicht geschaltet`); return; }
+  if (!n) return;
+  const t = await meTarget(me, n); if (!t) return;
+  const want = mode === 'auto' ? meTrans[me] : 'cut_transition';
+  const settings = { transition: want };
+  if (mode === 'auto' && ms) settings.transition_duration = Math.round(ms);
+  if (meTransNow[me] !== want || mode === 'auto') {
+    await requestRaw('SetInputSettings', { inputName: meSwitcher(me), inputSettings: settings, overlay: true });
+    meTransNow[me] = want;
+  }
+  const r = await requestRaw('TriggerHotkeyByName', { hotkeyName: t.src, contextName: meSwitcher(me) });
+  log(r.ok ? `[M/E] M/E${me} ${what} -> "${t.src}"${mode === 'auto' ? ` (${want}, ${Math.round(ms || 0)} ms)` : ''}`
+           : `[M/E] M/E${me}: Umschalten auf "${t.src}" fehlgeschlagen (${r.comment || ''})`);
+}
+// v5p: Vorschau je M/E - zweiter Source Switcher (Standard "M_E1_PVW", Muster $env:KAYAK_ME_PVW).
+// Folgt der PST-Wahl immer mit Schnitt. Fehlt er in OBS, wird das einmal gemeldet und dann still uebergangen.
+const ME_PVW = (process.env.KAYAK_ME_PVW || 'M_E{n}_PVW,M_E{n}_PST').split(','); // v5s: mehrere Namen erlaubt
+const pvwName = {}, pvwMissAt = {}, pvwCutSet = {};
+function mePvwNames(me) { return ME_PVW.map(x => x.trim().split('{n}').join(String(me))).filter(Boolean); }
+async function mePreview(me, n) {
+  if (!ready) { log(`[M/E] OBS nicht verbunden - M/E${me} PVW nicht geschaltet`); return; }
+  if (!n) return;
+  if (pvwMissAt[me] && Date.now() - pvwMissAt[me] < 10000) return; // fehlt -> alle 10 s neu suchen
+  let r = null, name = pvwName[me];
+  for (const cand of name ? [name] : mePvwNames(me)) {
+    r = await requestRaw('GetInputSettings', { inputName: cand });
+    if (r.ok) { name = cand; break; }
+  }
+  if (!r || !r.ok) {
+    if (!pvwMissAt[me]) log(`[M/E] Kein Vorschau-Switcher (${mePvwNames(me).map(x => '"' + x + '"').join(' oder ')}) in OBS - M/E${me} ohne PVW`);
+    pvwMissAt[me] = Date.now(); delete pvwName[me]; return;
+  }
+  if (!pvwName[me]) log(`[M/E] Vorschau-Switcher M/E${me}: "${name}"`);
+  pvwName[me] = name; pvwMissAt[me] = 0;
+  const list = ((r.data.inputSettings || {}).sources || []).map(x => (x && typeof x === 'object') ? x.value : x).filter(Boolean);
+  const N = me * ME_BLOCK + n, src = list[n - 1]; // v5t: n-te Quelle der Liste
+  if (!src) { log(`[M/E] M/E${me} PVW: Taste ${n} - "${name}" hat nur ${list.length} Quellen`); return; }
+  if (!pvwCutSet[me]) { await requestRaw('SetInputSettings', { inputName: name, inputSettings: { transition: 'cut_transition' }, overlay: true }); pvwCutSet[me] = true; }
+  const t = await requestRaw('TriggerHotkeyByName', { hotkeyName: src, contextName: name });
+  log(t.ok ? `[M/E] M/E${me} PVW Taste ${n} -> "${src}" (${name})` : `[M/E] M/E${me} PVW: Umschalten auf "${src}" fehlgeschlagen (${t.comment || ''})`);
+}
+
+async function meProgram(me, code) { return meSwitch(me, sceneNo(code), 'cut', 0, `PGM Taste ${sceneNo(code)}`); }
+
 function init(logger, h) {
   if (logger) log = logger;
   Object.assign(hooks, h || {});
@@ -591,5 +694,5 @@ function init(logger, h) {
   connect();
 }
 
-module.exports = { keyFilter, selectItem, black, joyReset, ftb, setTransType, setWipePattern, joy, assMessage, emem, sceneNo, init, preview, program, cut, auto, setDuration, tbar, tbarEnd, tbarAbort,
+module.exports = { wipeDirection, wipeSoftness, mePreview, meProgram, meSwitch, meSources, meSwitcher, keyFilter, selectItem, black, joyReset, ftb, setTransType, setWipePattern, joy, assMessage, emem, sceneNo, init, preview, program, cut, auto, setDuration, tbar, tbarEnd, tbarAbort,
   keySource, keySwitch, sceneOf, state: st, isReady: () => ready };

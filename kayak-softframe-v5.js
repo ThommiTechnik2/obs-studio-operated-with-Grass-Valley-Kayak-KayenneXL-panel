@@ -1,3 +1,20 @@
+// KAYAK SOFT-FRAME v5v (13.10.2026): Wipe-Softness-Regler (Achse 56) und Pattern Direction (Normal/Reverse, FlipFlop) vom Panel -> OBS
+// KAYAK SOFT-FRAME v5u (12.10.2026): KAYAK_MES (Standard 3) ersetzt KAYAK_CFG31="26,27,28,29=84"
+// KAYAK SOFT-FRAME v5t (12.10.2026): M/E-Taste n = n-te Quelle in der Switcher-Liste (nicht mehr Szenen-Position)
+// KAYAK SOFT-FRAME v5s (12.10.2026): Fehler behoben - nach M/E-CUT/AUTO wurden Lampen/Vorschau nicht nachgefuehrt (Kommentar verschluckte Code)
+// KAYAK SOFT-FRAME v5r (12.10.2026): OBS-Modul waehlbar (kayak-obs-standard.js, KAYAK_OBS_MODULE=NAME -> kayak-obs-NAME.js)
+// KAYAK SOFT-FRAME v5p (12.10.2026): Vorschau je M/E ueber zweiten Source Switcher "M_E1 PVW" .. (KAYAK_ME_PVW)
+// KAYAK SOFT-FRAME v5o (12.10.2026): Versuch Bus-Lampen M/E1..3 (Satz [M/E] 01 01/02 [Code]); aus mit KAYAK_ME_LAMPS=0
+// KAYAK SOFT-FRAME v5n (12.10.2026): M/E1..3 PST merken, CUT/AUTO (Source Switcher, Schnitt bzw. eigener Uebergang), Blendzeit je M/E
+// KAYAK SOFT-FRAME v5m (12.10.2026): M/E-Log zeigt Szenennummer (31-120)
+// KAYAK SOFT-FRAME v5l (12.10.2026): M/E-Szenennummern P/P 1-30, M/E1 31-60, M/E2 61-90, M/E3 91-120 (kayak-obs.js)
+// KAYAK SOFT-FRAME v5k (12.10.2026): M/E1..3 PGM-Bus -> OBS Source Switcher M_E1..M_E3 (n-te Quelle der Liste)
+// KAYAK SOFT-FRAME v5j (12.10.2026): Bus-Tasten mit M/E-Nummer (Byte 3) getrennt loggen, nicht mehr als P/P behandeln
+// KAYAK SOFT-FRAME v5i (12.10.2026): KAYAK_CFG31 ersetzt die Tabelle auch im Multicast-Anfangsstrom
+// KAYAK SOFT-FRAME v5h (12.10.2026): KAYAK_CFG31 fuer die ganze Tabelle; Schalter 25-28 = M/E 0-3 vorhanden, 29 = Anzahl M/Es (unteres Halbbyte)
+// KAYAK SOFT-FRAME v5g (12.10.2026): Versuchsmodus Systemtabelle 30 01 31 (KAYAK_CFG31) - M/E-Boards?
+// KAYAK SOFT-FRAME v5f (11.10.2026): Panel-Applikation speichern/laden (TFTP-Schreiben -> Ordner panel_store)
+// KAYAK SOFT-FRAME v5e (11.10.2026): eigene appli.ini im Ordner hat Vorrang (KAYAK_APPLI_FILE)
 // KAYAK SOFT-FRAME v5d (08.10.2026): Keyer-Encoder OPAC/GAIN/CLIP -> OBS-Filter Opacity + Luma Key
 // KAYAK SOFT-FRAME v5c (08.10.2026): Regler-Nachricht enthaelt Key 1..4 (a1..a4) -> Locate/Size/Crop je Key
 // KAYAK SOFT-FRAME v5b (08.10.2026): TFT-Regler Size + Crop (Gruppe a2) auf die delegierte Quelle
@@ -68,7 +85,16 @@ const BROADCAST_IP = '192.168.5.255';
 const FRAME_IP_BYTES = Buffer.from([192, 168, 5, 60]);
 
 const D = JSON.parse(fs.readFileSync(path.join(__dirname, 'softframe_data.json'), 'utf8'));
-const OBS = require('./kayak-obs.js');
+// v5q: OBS-Anbindung waehlbar. Standard: kayak-obs-standard.js. Andere: kayak-obs-NAME.js daneben legen und
+// mit KAYAK_OBS_MODULE=NAME starten (oder vollem Dateinamen/Pfad). Alle Module muessen dieselben Funktionen anbieten.
+const OBS_MODULE = (() => {
+  const m = process.env.KAYAK_OBS_MODULE || 'standard';
+  return (m.endsWith('.js') || m.includes('/') || m.includes('\\')) ? path.resolve(__dirname, m) : path.join(__dirname, `kayak-obs-${m}.js`);
+})();
+let OBS;
+try { OBS = require(OBS_MODULE); }
+catch (e) { console.error(`[INIT] OBS-Modul ${OBS_MODULE} nicht ladbar: ${e.message}`); process.exit(1); }
+console.log(`[INIT] OBS-Modul: ${path.basename(OBS_MODULE)}`);
 
 // ---- Applikationsname (v4f) ----
 // Der Frame meldet dem Panel den Namen der Applikation im Record 23 00 01 [Laenge] [Name]
@@ -164,6 +190,50 @@ for (const row of D.unicast_table) {
   if (!row.req) continue;
   if (!unicastTable.has(row.req)) unicastTable.set(row.req, []);
   unicastTable.get(row.req).push({ resp: row.resp, dt: row.dt || 0 });
+}
+// v5g: Versuchsmodus Systemtabelle "30 01 31" (Antwort auf 04 00 63 30 01 31, fragt das Panel beim Start).
+// Die Tabelle beginnt mit 28 Schaltern (01 = vorhanden?, 00 = fehlt?). Nummern 1..28.
+// $env:KAYAK_CFG31="10"        -> Schalter 10 auf 01
+// $env:KAYAK_CFG31="10,14,15"  -> mehrere
+// $env:KAYAK_CFG31="10=02"     -> eigener Wert (hex)
+// $env:KAYAK_CFG31="alle"      -> alle 00-Schalter 1..28 auf 01
+// Aus der Panel-Software (CSystem::MEAvailable): Nr. 25..28 = M/E 0..3 vorhanden (0 = P/P), Nr. 29 unteres
+// Halbbyte = Anzahl M/Es (Original 81 = 1 M/E). Alle M/Es: KAYAK_CFG31="26,27,28,29=84"
+// Wirkt erst nach Panel-Neustart. Ohne Variable: Original.
+const CFG31_REQ = '040063300131', CFG31_OFS = 8, CFG31_N = 29; // v5h: Nummern bis Tabellenende erlaubt
+{
+  const ent = unicastTable.get(CFG31_REQ);
+  if (ent && ent[0]) {
+    const b = Buffer.from(ent[0].resp, 'hex');
+    const sw = (i) => b[CFG31_OFS + i].toString(16).padStart(2, '0');
+    log('[CFG31] Schalter (Original): ' + Array.from({ length: CFG31_N }, (_, i) => `${i + 1}:${sw(i)}`).join(' '));
+    // v5u: KAYAK_MES = Anzahl M/Es neben P/P (0..3, Standard 3). Setzt Schalter 26..28 und 29 passend.
+    //      KAYAK_CFG31 (Experten) hat Vorrang. KAYAK_MES=0 = Original des Frames.
+    const nMes = Math.max(0, Math.min(3, parseInt(process.env.KAYAK_MES !== undefined ? process.env.KAYAK_MES : '3', 10) || 0));
+    const mesSpec = nMes ? [...Array(nMes)].map((_, i) => `${26 + i}`).concat([`29=${(0x80 | (nMes + 1)).toString(16)}`]).join(',') : '';
+    const spec = (process.env.KAYAK_CFG31 || mesSpec).trim();
+    if (!process.env.KAYAK_CFG31) log(`[CFG31] M/Es neben P/P: ${nMes} (KAYAK_MES)`);
+    if (spec) {
+      const items = spec.toLowerCase() === 'alle'
+        ? Array.from({ length: 28 }, (_, i) => i).filter(i => b[CFG31_OFS + i] === 0).map(i => `${i + 1}`)
+        : spec.split(/[,; ]+/).filter(Boolean);
+      for (const it of items) {
+        const [n, v] = it.split('=');
+        const i = parseInt(n, 10) - 1, val = v !== undefined ? parseInt(v, 16) : 1;
+        if (i >= 0 && CFG31_OFS + i < b.length && val >= 0 && val <= 255) { b[CFG31_OFS + i] = val; }
+        else log(`[CFG31] ungueltig: ${it}`);
+      }
+      const origHex = ent[0].resp.slice(4), newHex = b.toString('hex').slice(4);
+      ent[0].resp = b.toString('hex');
+      // v5i: dieselbe Tabelle steckt auch im Multicast-Anfangsstrom (bei ~6 s) und wuerde den Versuch ueberschreiben
+      let nRep = 0;
+      for (const list of [D.stream, D.stream_initial, D.idle_loop]) for (const e of list || []) {
+        if (e && e.hex && e.hex.includes(origHex)) { e.hex = e.hex.split(origHex).join(newHex); nRep++; }
+      }
+      log(`[CFG31] auch im Multicast-Strom ersetzt: ${nRep} Paket(e)`);
+      log(`[CFG31] VERSUCH aktiv (${spec}): ` + Array.from({ length: CFG31_N }, (_, i) => `${i + 1}:${sw(i)}`).join(' '));
+    }
+  } else log('[CFG31] Anfrage 30 01 31 nicht in den Daten');
 }
 log(`[INIT] ${unicastTable.size} bekannte Unicast-Anfragen mit Antwort, ${D.stream.length} Multicast-Pakete, ${Object.keys(D.tftp).length} TFTP-Dateien`);
 
@@ -588,8 +658,34 @@ function onTransType(sel, typ) {
   if (sel === 0) OBS.setTransType(typ);
 }
 const seen46 = new Set();
+function meLever(me, v) {
+  const m = meSt[me], L = m.lev || (m.lev = { min: v, max: 32767, armed: true, from: null, t0: 0 });
+  if (v < L.min) L.min = v;
+  const p = (v - L.min) / Math.max(1, L.max - L.min);         // 0..1
+  const atEnd = p < 0.05 ? 0 : p > 0.95 ? 1 : null;
+  if (atEnd !== null) { if (!L.armed) log(`[M/E] M/E${me} Hebel am Anschlag - bereit`); L.armed = true; L.from = atEnd; L.t0 = 0; return; }
+  if (!L.armed) return;
+  if (!L.t0) L.t0 = Date.now();
+  if ((L.from === 0 && p >= 0.5) || (L.from === 1 && p <= 0.5)) {
+    L.armed = false;
+    const ms = Math.max(150, Math.min(5000, 2 * (Date.now() - L.t0)));
+    if (!m.pst) { log(`[M/E] M/E${me} Hebel: noch keine PST-Taste gewaehlt`); return; }
+    OBS.meSwitch(me, m.pst, 'auto', ms, `Hebel (${Math.round(ms)} ms)`);
+    const old = m.pgm; m.pgm = m.pst; m.pst = old; const oc = m.pgmC; m.pgmC = m.pstC; m.pstC = oc; meBusLamps(me); OBS.mePreview(me, m.pst);
+  }
+}
+// v5o: Bus-Lampen der M/E zurueckmelden - wie bei P/P (Satz 00 01 01/02 [Code]), nur mit M/E-Nummer vorne
+function meBusLamps(me) {
+  const m = meSt[me], r = [];
+  if (m.pgmC !== undefined) r.push(rec(hex2(me) + '0101' + hex2(m.pgmC) + '000000'));
+  if (m.pstC !== undefined) r.push(rec(hex2(me) + '0102' + hex2(m.pstC) + '000000'));
+  if (r.length && process.env.KAYAK_ME_LAMPS !== '0') sendMc(packet(r), '239.168.5.60');
+}
+// v5n: Zustand je M/E (Tastennummern 1..30, Blendzeit in Frames)
+const meSt = { 1: { pgm: 0, pst: 0, rate: parseInt(process.env.KAYAK_ME_RATE || '25', 10) }, 2: { pgm: 0, pst: 0, rate: parseInt(process.env.KAYAK_ME_RATE || '25', 10) }, 3: { pgm: 0, pst: 0, rate: parseInt(process.env.KAYAK_ME_RATE || '25', 10) } };
 function handleKey(msg, rinfo) {
   const h = msg.toString('hex');
+  if (process.env.KAYAK_RAW === '1') log(`[ROH] ${h}`); // v5j: alle Panel-Meldungen roh anzeigen
   if (msg.length === 8 && h.startsWith('0600251e000101')) {
     keypad.value = msg[7];
     if (rinfo) s56629.send(Buffer.from('0600851e00010006', 'hex'), rinfo.port, rinfo.address);
@@ -613,10 +709,42 @@ function handleKey(msg, rinfo) {
   }
   if (msg.length === 9 && h.startsWith('07002600080a')) { setRate(msg[6], msg.readUInt16LE(7)); return true; }
   if (msg.length === 8 && h.startsWith('0600251e0018')) { log('[MIX] E-MEM-Dauer ' + msg.readUInt16LE(6) + ' Frames (nur E-MEM, ignoriert)'); return true; }
+  // v5n: M/E1..3 CUT/AUTO (05 00 e4 [M/E] 08 06/05 00) und Blendzeit (07 00 26 [M/E] 08 0a 00 [u16 Frames])
+  if (msg.length === 7 && msg[2] === 0xe4 && msg[3] >= 1 && msg[3] <= 3 && msg[4] === 0x08 && (msg[5] === 0x06 || msg[5] === 0x05) && msg[6] === 0x00) {
+    const me = msg[3], m = meSt[me], isAuto = msg[5] === 0x05;
+    if (!m.pst) { log(`[M/E] M/E${me} ${isAuto ? 'AUTO' : 'CUT'}: noch keine PST-Taste gewaehlt`); return true; }
+    const ms = m.rate * FRAME_MS;
+    OBS.meSwitch(me, m.pst, isAuto && ms >= 80 ? 'auto' : 'cut', ms, isAuto ? 'AUTO' : 'CUT');
+    // wie am Mischer: PGM und PST tauschen
+    const old = m.pgm; m.pgm = m.pst; m.pst = old; const oc = m.pgmC; m.pgmC = m.pstC; m.pstC = oc; meBusLamps(me); OBS.mePreview(me, m.pst);
+    return true;
+  }
+  // v5n: Blendenhebel M/E1..3 (06 00 a5 [M/E] 08 0b [u16 0..7fff]). Der Source Switcher kennt keinen Hebel ->
+  // sobald der Hebel die Mitte passiert, startet eine Blende; Dauer = 2 x Zeit seit Verlassen des Anschlags.
+  if (msg.length === 8 && (msg[2] & 0x7f) === 0x25 && msg[3] >= 1 && msg[3] <= 3 && msg[4] === 0x08 && msg[5] === 0x0b) {
+    meLever(msg[3], msg.readUInt16LE(6));
+    return true;
+  }
+  if (msg.length === 9 && msg[2] === 0x26 && msg[3] >= 1 && msg[3] <= 3 && msg[4] === 0x08 && msg[5] === 0x0a && msg[6] === 0x00) {
+    const me = msg[3]; meSt[me].rate = msg.readUInt16LE(7);
+    sendMc(packet([rec(hex2(me) + '080a00' + u16(meSt[me].rate))]), '239.168.5.60');
+    log(`[M/E] M/E${me} Blendzeit ${meSt[me].rate} Frames = ${meSt[me].rate * FRAME_MS} ms`);
+    return true;
+  }
   // Bus-Taste: 06 00 x5 00 01 [Reihe] [Taste] [01/00]
   if (msg.length === 8 && (msg[2] & 0x7f) === 0x25 && msg[4] === 0x01) {
     const row = msg[5], key = msg[6], pressed = msg[7] === 1;
     if (!pressed) return true;
+    if (msg[3] !== 0x00) { // v5j: Bus-Taste einer M/E (Byte 3 = M/E-Nummer, 00 = P/P) - noch nicht an OBS
+      { const n = OBS.sceneNo(key); log(`[M/E] M/E${msg[3]} ${row === 1 ? 'PGM' : row === 2 ? 'PST' : 'Reihe' + row} Taste ${n || '?'} (Code ${key.toString(16)})`); }
+      const me = msg[3], n = OBS.sceneNo(key);
+      if (me >= 1 && me <= 3 && n) {
+        if (row === 1) { meSt[me].pgm = n; meSt[me].pgmC = key; OBS.meProgram(me, key); } // v5k: M/E-PGM -> Source Switcher M_E1..3
+        if (row === 2) { meSt[me].pst = n; meSt[me].pstC = key; OBS.mePreview(me, n); }   // v5n: PST merken, v5p: PVW-Switcher
+        meBusLamps(me);
+      }
+      return true;
+    }
     const name = row === 1 ? 'PGM' : row === 2 ? 'PST' : `Reihe${row}`;
     if (row === 1) { mix.pgm = key; OBS.program(key); OBS.assMessage(`PGM ${OBS.sceneNo(key)}`); }
     if (row === 2) { mix.pst = key; OBS.preview(key); OBS.assMessage(`PST ${OBS.sceneNo(key)}`); }
@@ -640,6 +768,16 @@ function handleKey(msg, rinfo) {
       if (key !== keyDelIdx) setDelegate(key, 'regler');
       OBS.keyFilter(key, kind, msg.readInt16LE(6), mix.pst); return true;
     }
+  }
+  // Wipe-Softness (Log 13.10.): 06 00 c5 00 08 56 [int16 Schritt] -> OBS luma_softness (kayak-obs.js wipeSoftness)
+  if (msg.length === 8 && msg[2] === 0xc5 && msg[3] === 0x00 && msg[4] === 0x08 && msg[5] === 0x56) {
+    OBS.wipeSoftness(msg.readInt16LE(6)); return true;
+  }
+  // Pattern Direction (Log 13.10.): 05 00 24 00 08 [53 = Normal/Reverse, 54 = FlipFlop] [Wert]
+  //   53 00 = Normal, 53 01 = Reverse, 54 01 = FlipFlop (Zustand kommt vom Panel, kein Mitzaehlen noetig)
+  if (msg.length === 7 && msg[2] === 0x24 && msg[3] === 0x00 && msg[4] === 0x08
+      && (msg[5] === 0x53 || msg[5] === 0x54) && msg[6] <= 0x01) {
+    OBS.wipeDirection(msg[5] === 0x53 ? 'rev' : 'flipflop', msg[6] === 0x01); return true;
   }
   if (msg.length === 8 && msg[2] === 0xc5 && msg[3] === 0x00 && [0x14, 0x15, 0x17].includes(msg[5])) {
     OBS.joy(msg[4], msg[5], msg.readInt16LE(6), mix.pst); return true;
@@ -722,6 +860,7 @@ function on56629(msg, rinfo) {
         setTimeout(() => s56629.send(hx(a.resp), rinfo.port, rinfo.address), Math.round(a.dt * 1000));
       }
       stats.unicastAnswered++;
+      if (key === CFG31_REQ) log(`[CFG31] Panel hat die Systemtabelle abgefragt${process.env.KAYAK_CFG31 ? ' (Versuch: ' + process.env.KAYAK_CFG31 + ')' : ''}`);
       log(`[UNICAST] Anfrage ${key.slice(0, 24)}${key.length > 24 ? '...' : ''} -> ${answers.length} Antwort(en)`);
     } else {
       stats.unicastUnknown++;
@@ -876,11 +1015,84 @@ for (const [name, b64] of Object.entries(D.tftp)) {
   const src = (APPLI_ORIG && name.endsWith('/appli.ini')) ? D.tftp_appli_bak : b64;
   tftpFiles.set(path.posix.basename(name), Buffer.from(src, 'base64'));
 }
+// v5e: eigene appli.ini im Soft-Frame-Ordner hat Vorrang (zum Bearbeiten in VS Code).
+// Datei: appli.ini neben kayak-softframe-*.js, oder Pfad per $env:KAYAK_APPLI_FILE. Wird bei JEDEM Panel-Start
+// neu gelesen, d. h. nach einer Aenderung reicht ein Neustart des Panels. KAYAK_APPLI=orig hat Vorrang.
+const APPLI_FILE = process.env.KAYAK_APPLI_FILE || path.join(__dirname, 'appli.ini');
+function localAppli() {
+  if (APPLI_ORIG) return null;
+  try {
+    let txt = fs.readFileSync(APPLI_FILE, 'latin1');
+    if (APP_NAME !== APP_OLD) txt = txt.split(APP_OLD).join(APP_NAME);
+    return Buffer.from(txt, 'latin1');
+  } catch (e) { return null; }
+}
+{ const la = localAppli(); log(la ? `[INIT] Eigene appli.ini wird verwendet: ${APPLI_FILE} (${la.length} Byte)`
+                                  : '[INIT] Keine eigene appli.ini im Ordner - eingebettete Fassung (Sz01-Sz96)'); }
+// v5f: Panel-Applikation speichern/laden wie beim echten Frame.
+// Panel-Menue "Save Application" schickt appli_cp.ini, state_cp.bin usw. per TFTP an den Frame.
+// Das Soft-Frame legt sie im Ordner panel_store (neben dem Skript) ab; vorhandene Dateien werden
+// vorher als *.bak-JJJJMMTT-HHMMSS gesichert. "Load Application" holt sie von dort zurueck.
+// Ordner aendern: $env:KAYAK_STORE="C:\\pfad"
+const STORE_DIR = process.env.KAYAK_STORE || path.join(__dirname, 'panel_store');
+function storePath(name) {
+  const parts = name.replace(/\\/g, '/').split('/').filter(x => x && x !== '.' && x !== '..')
+    .map(x => x.replace(/[<>:"|?*\x00-\x1f]/g, '_'));
+  return parts.length ? path.join(STORE_DIR, ...parts) : null;
+}
+function findByBase(dir, base) {
+  let best = null;
+  let list = []; try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return null; }
+  for (const d of list) {
+    const p = path.join(dir, d.name);
+    const c = d.isDirectory() ? findByBase(p, base) : (d.name === base ? p : null);
+    if (c && (!best || fs.statSync(c).mtimeMs > fs.statSync(best).mtimeMs)) best = c;
+  }
+  return best;
+}
+function storeRead(name) {
+  try {
+    let p = storePath(name);
+    if (!p || !fs.existsSync(p)) p = findByBase(STORE_DIR, path.posix.basename(name.replace(/\\/g, '/')));
+    if (!p) return null;
+    const b = fs.readFileSync(p); log(`[STORE] liefere ${path.relative(STORE_DIR, p)} (${b.length} Byte)`); return b;
+  } catch (e) { return null; }
+}
+function tftpReceive(name, rinfo) {
+  const t = dgram.createSocket('udp4');
+  const chunks = []; let expect = 1, timer = null, done = false;
+  const ack = (n) => { const a = Buffer.alloc(4); a.writeUInt16BE(4, 0); a.writeUInt16BE(n & 0xffff, 2); t.send(a, rinfo.port, rinfo.address); };
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => { log(`[STORE] Abbruch (Zeitueberschreitung) ${name}`); t.close(); }, 10000); };
+  t.on('error', (e) => console.error('[STORE] Fehler:', e.message));
+  t.on('message', (m, ri) => {
+    if (ri.port !== rinfo.port || m.readUInt16BE(0) !== 3) return;
+    const blk = m.readUInt16BE(2);
+    if (blk === ((expect - 1) & 0xffff)) { ack(blk); return; } // Wiederholung
+    if (done || blk !== (expect & 0xffff)) return;
+    chunks.push(m.slice(4)); ack(blk); expect++; arm();
+    if (m.length - 4 < 512) {
+      done = true; clearTimeout(timer); setTimeout(() => t.close(), 3000); // offen lassen fuer wiederholten letzten Block
+      const data = Buffer.concat(chunks), p = storePath(name);
+      try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        if (fs.existsSync(p)) {
+          const d = new Date(), z = (n) => String(n).padStart(2, '0');
+          fs.renameSync(p, `${p}.bak-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`);
+        }
+        fs.writeFileSync(p, data);
+        log(`[STORE] Panel hat gespeichert: ${name} -> ${path.relative(__dirname, p)} (${data.length} Byte)`);
+      } catch (e) { log(`[STORE] Schreiben fehlgeschlagen ${name}: ${e.message}`); }
+    }
+  });
+  t.bind(0, () => { log(`[STORE] Panel speichert ${name} ...`); ack(0); arm(); });
+}
 mkSocket(69, 'TFTP', (msg, rinfo) => {
   const op = msg.readUInt16BE(0);
-  if (op !== 1) return; // nur Lese-Anfragen
   const name = msg.slice(2).toString('latin1').split('\0')[0];
-  const data = tftpFiles.get(path.posix.basename(name));
+  if (op === 2) return tftpReceive(name, rinfo); // v5f: Panel speichert (Save Application)
+  if (op !== 1) return;
+  const base = path.posix.basename(name);
+  const data = (base === 'appli.ini' && localAppli()) || (base !== 'appli.ini' && storeRead(name)) || tftpFiles.get(base);
   const t = dgram.createSocket('udp4');
   t.on('error', (e) => console.error('[TFTP] Fehler:', e.message));
   t.bind(0, () => {
