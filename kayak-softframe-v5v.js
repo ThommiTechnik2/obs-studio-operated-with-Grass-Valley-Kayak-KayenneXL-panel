@@ -1,4 +1,4 @@
-// KAYAK SOFT-FRAME v5v (13.10.2026): Wipe-Softness-Regler (Achse 56) und Pattern Direction (Normal/Reverse, FlipFlop) vom Panel -> OBS
+// KAYAK SOFT-FRAME v5v (14.10.2026): Tastenklick per Standard aus (KAYAK_KEYCLICK), Beeper schaltbar (KAYAK_BEEPER)
 // KAYAK SOFT-FRAME v5u (12.10.2026): KAYAK_MES (Standard 3) ersetzt KAYAK_CFG31="26,27,28,29=84"
 // KAYAK SOFT-FRAME v5t (12.10.2026): M/E-Taste n = n-te Quelle in der Switcher-Liste (nicht mehr Szenen-Position)
 // KAYAK SOFT-FRAME v5s (12.10.2026): Fehler behoben - nach M/E-CUT/AUTO wurden Lampen/Vorschau nicht nachgefuehrt (Kommentar verschluckte Code)
@@ -681,6 +681,19 @@ function meBusLamps(me) {
   if (m.pstC !== undefined) r.push(rec(hex2(me) + '0102' + hex2(m.pstC) + '000000'));
   if (r.length && process.env.KAYAK_ME_LAMPS !== '0') sendMc(packet(r), '239.168.5.60');
 }
+// v5v: Persoenliche Einstellungen des Panels setzen (wie das Sidepanel, Mitschnitt Siedepanel2 14.10.):
+// Objekt 21 05, Kennung 01 = Beeper, 03 = Tastenklick; Wert 00 aus / 01 an.
+// KAYAK_KEYCLICK = off (Standard) | on | keep ; KAYAK_BEEPER = keep (Standard) | off | on
+function personalSettings() {
+  const want = (v, def) => { const x = (v || def).toLowerCase(); return x === 'off' || x === '0' ? 0 : x === 'on' || x === '1' ? 1 : null; };
+  const kc = want(process.env.KAYAK_KEYCLICK, 'off'), bp = want(process.env.KAYAK_BEEPER, 'keep');
+  const send = (kw, val, name) => {
+    s56629.send(Buffer.from([0x05, 0x00, 0x25, 0x21, 0x05, kw, val]), 56629, PANEL_IP);
+    log(`[PANEL] ${name} ${val ? 'an' : 'aus'}`);
+  };
+  if (kc !== null) send(0x03, kc, 'Tastenklick');
+  if (bp !== null) send(0x01, bp, 'Beeper');
+}
 // v5n: Zustand je M/E (Tastennummern 1..30, Blendzeit in Frames)
 const meSt = { 1: { pgm: 0, pst: 0, rate: parseInt(process.env.KAYAK_ME_RATE || '25', 10) }, 2: { pgm: 0, pst: 0, rate: parseInt(process.env.KAYAK_ME_RATE || '25', 10) }, 3: { pgm: 0, pst: 0, rate: parseInt(process.env.KAYAK_ME_RATE || '25', 10) } };
 function handleKey(msg, rinfo) {
@@ -769,16 +782,6 @@ function handleKey(msg, rinfo) {
       OBS.keyFilter(key, kind, msg.readInt16LE(6), mix.pst); return true;
     }
   }
-  // Wipe-Softness (Log 13.10.): 06 00 c5 00 08 56 [int16 Schritt] -> OBS luma_softness (kayak-obs.js wipeSoftness)
-  if (msg.length === 8 && msg[2] === 0xc5 && msg[3] === 0x00 && msg[4] === 0x08 && msg[5] === 0x56) {
-    OBS.wipeSoftness(msg.readInt16LE(6)); return true;
-  }
-  // Pattern Direction (Log 13.10.): 05 00 24 00 08 [53 = Normal/Reverse, 54 = FlipFlop] [Wert]
-  //   53 00 = Normal, 53 01 = Reverse, 54 01 = FlipFlop (Zustand kommt vom Panel, kein Mitzaehlen noetig)
-  if (msg.length === 7 && msg[2] === 0x24 && msg[3] === 0x00 && msg[4] === 0x08
-      && (msg[5] === 0x53 || msg[5] === 0x54) && msg[6] <= 0x01) {
-    OBS.wipeDirection(msg[5] === 0x53 ? 'rev' : 'flipflop', msg[6] === 0x01); return true;
-  }
   if (msg.length === 8 && msg[2] === 0xc5 && msg[3] === 0x00 && [0x14, 0x15, 0x17].includes(msg[5])) {
     OBS.joy(msg[4], msg[5], msg.readInt16LE(6), mix.pst); return true;
   }
@@ -840,6 +843,7 @@ function on56629(msg, rinfo) {
         log('[HANDSHAKE] Confirm gesendet, starte Multicast-Strom und Pings');
         startStream();
         startPings();
+        stateTimers.push(setTimeout(personalSettings, 8000)); // v5v: Tastenklick/Beeper
         // wie der echte Frame: 0,57 s nach dem Confirm ein Boot-Announce (Typ 8102) als Broadcast
         stateTimers.push(setTimeout(() => s1024.send(hx(D.boot_broadcast_8102), 56713, BROADCAST_IP), Math.round(D.boot_8102_delay_after_confirm * 1000)));
       }, Math.round(D.confirm_delay * 1000));

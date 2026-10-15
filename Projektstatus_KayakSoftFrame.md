@@ -1,6 +1,11 @@
 # Kayak Soft-Frame – Projektstatus
 
-**Stand: Donnerstag, 08.10.2026, 11:45 Uhr — v5d: Quellenwahl Key 1–4, Locate/Size/Crop je Key (bestätigt), OPAC/GAIN/CLIP → OBS-Filter. Davor v4l: Ebene 7 CUT/MIX → Szene „Black“ (bestätigt), Joystick-Reset. v4h: Keys/DSK, Joystick (beide Formate) am Panel bestätigt; Wipes → OBS „Wischen“. Davor v4f/v4e: OBS + Advanced Scene Switcher (bestätigt), Joystick → Bild-im-Bild (ungetestet): PGM/PST 1–30, CUT, AUTO, Blendenhebel, Blendzeit, Key-Delegation funktionieren mit echtem OBS. Davor (v3w): PGM/PST-Bus, Key-Delegate, Blendzeiten (AUTO + Key 1–4), Key-Bus, Key CUT/MIX, Next Transition, Wipe-Auswahl, CUT/AUTO/Hebel – alles am Panel bestätigt.**
+**Stand: Mittwoch, 14.10.2026 — v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
+M/E-Tasten, PST, CUT, AUTO, Hebel, Blendzeit über Source Switcher `M_E1_PGM`–`M_E3_PGM`, Vorschau über `M_E1_PVW`–`M_E3_PVW`
+(Multiview). M/E-Taste n = n-te Quelle der Switcher-Liste. M/E1–3 liegen auf P/P-Taste 13–15 (Szenen „M/E1–3“).
+Start: `node kayak-softframe-v5u.js` (M/Es per Standard an, `KAYAK_MES=3`; ersetzt `KAYAK_CFG31="26,27,28,29=84"`).
+OBS-Anbindung wählbar: `KAYAK_OBS_MODULE=NAME` → `kayak-obs-NAME.js`. Nächste Themen: Feinschliff (Thomas), dann
+JLCooper/Contour/CasparCG/OGraf; nach 19.10. echter Frame (Lizenz, Save-Mitschnitt, Tally-Farben M/E, TFT-Werte).**
 
 > Hinweis: Auf dem Mac (OneDrive) liegt ein Stand vom Samstag (v7) mit Fahrplan und CasparCG-Notizen.
 > Dieser Stand hier ist neuer und enthält die Punkte daraus (Abschnitt 8). Beim Zusammenführen diesen Stand nehmen.
@@ -232,11 +237,65 @@ Zurücksetzen: `Remove-Item Env:KAYAK_*` oder neues Fenster.
 - Macros über den Ziffernblock.
 - Eingangsanzahl: 4RU = 48 Eingänge; Frage, ob 96 (8RU) möglich ist – appli.ini kennt bereits 0–96.
 - Log-Beschriftung: interne Quellen (89/8a) noch als "intern" angezeigt.
-- **Tastenbelegung dauerhaft speichern:** Belegung steht in `appli_cp.ini` (`[DefaultBusAssign]`, KEYnn =
-  Eingangsnummer, KEY16 = Shift, KEY17–25 = Shift-Ebene Taste 1–9). Vorbereitet: `GV Dateien\appli_cp_obs.ini`
-  (Taste 1–15 = Sz01–15, Shift+1–9 = Sz16–24). Save/Save As unter Config → Application Control nur mit
-  USB-Stick am Panel (nicht SPARE-Buchse) → Test steht aus. Panel zeigt Application "20230209 DUPLEX1-NORM",
-  lädt aber per TFTP `20230203 DUPLEX1-NORM`.
+- **Tastenbelegung dauerhaft speichern (11.10. geklärt):**
+  - Panel-OS = VxWorks (Telnet-Shell `->`; `devs`, `ll "/pfad"`, `copy "/datei"` = anzeigen; `ls -l` → Page Fault).
+  - `appli_cp.ini` liegt **nicht im Flash**. `/appli/current/appli_cp.ini` (Treiber 15) ist eine virtuelle Datei,
+    die das Panel aus dem **batteriegepufferten NV-RAM** erzeugt. **Batterie im Panel ist leer** (Meldung im Display)
+    → Belegung geht beim Ausschalten verloren. **Zuerst Batterie tauschen** (Typ/Ort nicht im Handbuch → Panel öffnen,
+    Knopfzelle oder NV-RAM-Baustein mit eingebauter Batterie; Foto an Claude).
+  - Das Panel hat einen **eigenen TFTP-Server** (früher so geholt, siehe neuerlog.pcapng). Sicherung vom Mac:
+    `tftp 192.168.5.63` → `binary` → `get /appli/current/appli_cp.ini appli_cp_backup.ini`.
+    Einspielen (erst nach Batterietausch): `put appli_cp_neu.ini /appli/current/appli_cp.ini` (so macht es auch der Frame).
+  - Panel-Menü **Save** (mit USB-Stick) schickt an den Frame: Name `21Broadcast`, Speicherort = Panel-IP + `/bd/appli/21Broadcast`
+    (`/bd` = vermutlich USB-Stick), Befehl `e8 22 02 29`. Der echte Frame schreibt dann seine Dateien per TFTP ins Panel und
+    meldet „fertig“ → Soft-Frame kennt die Antwort noch nicht, Panel wartet. **Mitschnitt Save mit echtem Frame nach 19.10.**
+  - v5f: Soft-Frame nimmt TFTP-Schreiben an (Ordner `panel_store`) – wird vom Panel-Save aber nicht benutzt, schadet nicht.
+- **Lizenzen (96 Eingänge):** am Panel unter Home → Install → System → Licenses (USB-Stick mit `sp_license.txt`
+  oder Eintippen), danach System-Neustart. Gespeichert in 2 EEPROMs im **Frame**-Backplane → nur mit echtem Frame;
+  Lizenzen sind an den Frame gebunden (Handbuch S. 172–173). Termin: nach 19.10.
+- **M/E-Reihen (M/E1–3) senden nichts** (11.10., mit tcpdump geprüft: kein Paket vom Panel). Vermutlich meldet der
+  Frame-Startzustand (Mitschnitt) diese M/Es nicht als vorhanden (Switcher-Typ/Lizenz). Nach 19.10.: Lizenz eintragen,
+  M/E-Tasten am echten Frame prüfen, neuer Boot-Mitschnitt fürs Soft-Frame. `MEDelEnableMask` (Config → M/E DelMask,
+  Bitmaske der Delegationsziele; früher 33554431, jetzt 16777215) ist nicht die Ursache.
+  Mitschnitt MEs.pcapng (11.10.): Delegationstasten P/P, M/E1–3 → Panel sendet nichts, Lampen bleiben aus
+  (bei Key/Wipe-Delegation kommt die Lampe erst nach Rückmeldung des Frames) → Panel sperrt die Tasten, weil die M/Es
+  laut Startzustand fehlen. `85 4a [1..4] 02 ..` im Strom = Ruhe-Schleife des alten Frames, nicht vom Panel.
+  **Thomas: keine Lizenzfrage, sondern Anzahl eingebauter M/E-Boards** (großer Frame ist weg). Kandidaten im Soft-Frame:
+  (1) Objektliste (Antwort auf `04 00 63 23 00 01`) meldet schon M/E 0–3 + halbe M/E → nicht die Ursache;
+  (2) **Systemtabelle `30 01 31`** (Antwort auf `04 00 63 30 01 31`), beginnt mit Schaltern `01…00…` → Hauptverdacht.
+  **Nächster Schritt (12.10.):** Versuchsmodus im Soft-Frame, einzelne `00` per Umgebungsvariable auf `01`, nach jedem
+  Panel-Neustart Lampen P/P, M/E1–3 prüfen.
+  ✅ **GELÖST (12.10., v5i/v5j):** Aus der Panel-Software (x86-ELF ds0104.704, nicht gestrippt): Delegationstaste prüft
+  `CSystem::MEAvailable(me)` = (me < Anzahl) und Flag. Systemtabelle `30 01 31`: Schalter 25–28 = M/E 0–3 vorhanden
+  (Original 01 00 00 00), Schalter 29 unteres Halbbyte = Anzahl M/Es (Original 0x81 = 1). Dieselbe Tabelle steckt auch im
+  Multicast-Anfangsstrom (~6 s) → muss dort mit ersetzt werden (v5i). Start: `KAYAK_CFG31="26,27,28,29=84"`.
+  Ergebnis: Lampen P/P, M/E1–3 leuchten; Bus-Tasten kommen als `06 00 25 [M/E] 01 [Reihe] [Code] [01/00]`,
+  M/E = 0 P/P, 1–3 M/E1–3 (v5j loggt `[M/E] …`, noch nicht an OBS). Nach Delegation fragt das Panel
+  `05 00 24 [n] 20 13/84` (n: M/E2→01, M/E3→02, P/P→03). Telnet-Prüfung: `sysp = GetInstance__7CSystem()`,
+  `cfg = *(sysp + 0x150)`, `d cfg + 0x6ef, 8, 1` (VxWorks: `p` und `s` sind belegt!). `KAYAK_RAW=1` zeigt alle Panel-Meldungen roh.
+  ✅ **M/E → OBS (12.10., v5k–v5o, am Panel bestätigt):** Szenen „M/E1–3“ enthalten je einen Source Switcher (Exeldro)
+  „M_E1–3“ (Muster `KAYAK_ME_SW`). Szenennummern: P/P 1–30, M/E1 31–60, M/E2 61–90, M/E3 91–120 (Position in der
+  OBS-Szenenliste); diese Szenen stehen in der Liste des jeweiligen Switchers (sonst n-te Quelle). Umschalten per
+  `TriggerHotkeyByName` (hotkeyName = Quellenname, contextName = Switcher). PGM = Schnitt, PST wird gemerkt,
+  CUT `05 00 e4 [M/E] 08 06 00` = Schnitt, AUTO `…08 05 00` = Übergang des Switchers (vom Nutzer eingestellt, sonst
+  fade) mit Blendzeit `07 00 26 [M/E] 08 0a 00 [Frames]` (Standard 25 = 1 s, `KAYAK_ME_RATE`); danach PGM↔PST tauschen.
+  Hebel `06 00 a5 [M/E] 08 0b [u16]` (M/E-Hebel ab ~000C): Blende startet bei Mitte, Dauer = 2 × Zeit ab Anschlag.
+  Bus-Lampen: Satz `[M/E] 01 01/02 [Code] 00 00 00` (v5o) → Tasten leuchten BRIGHT statt RED (Tally-Blöcke nur P/P).
+  ✅ M/E-Vorschau (v5p–v5t): zweiter Switcher je M/E (`M_E{n}_PVW` oder `M_E{n}_PST`), folgt PST mit Schnitt, nach
+  CUT/AUTO/Hebel die neue PST. Liegt in eigenen Szenen („M/E1–3 PVW“, Szene 121–123) im Multiview, nicht auf dem Panel.
+  v5s: Fehler behoben (Kommentar verschluckte nach M/E-CUT Lampen/Vorschau). v5t: Taste n = n-te Quelle der
+  Switcher-Liste (Szenen-Position führte zu Versatz um 1). v5u: `KAYAK_MES` (Standard 3).
+  Dateien: `kayak-softframe-v5u.js`, `kayak-obs-standard.js` (alte `kayak-obs.js` nicht mehr benutzt).
+  README (EN/DE) aktualisiert, ohne Datencodes.
+  Offen: Tally-Farben M/E (Bus-Lampen nur BRIGHT).
+- ✅ **Tastenklick aus (14.10., v5v, bestätigt):** Persönliche Einstellungen des Panels liegen in Objekt `21 05`
+  (01 = Beeper, 03 = Tastenklick; Tabelle `CMpCpPersonalSettings::kwFuncCpPSet` in ds0104.704). Soft-Frame sendet 8 s nach
+  dem Confirm `05 00 25 21 05 03 00` (Tastenklick aus). `KAYAK_KEYCLICK=on|off|keep` (Standard off),
+  `KAYAK_BEEPER=on|off|keep` (Standard keep). Im TFT-Menü und im Sidepanel gibt es dafür keinen Schalter.
+- **Sidepanel (14.10.):** verbindet sich direkt mit dem Panel (.63). Problem war die WLAN-Adresse des Laptops
+  (192.168.178.63): Sidepanel meldet sich mit der Adresse der Haupt-Netzwerkkarte an → WLAN aus bzw. LAN-Metrik 1.
+  Danach sofort verbunden. Sidepanel fragt beim Soft-Frame per TFTP `/ramdisk/version.txt` (nicht vorhanden, harmlos).
+- **Panel-Datenträger sichern (geplant):** Dateien per Telnet/TFTP sichern, dann 1:1-Abbild (dd) auf Industrie-CF/IDE-DOM.
 
 ---
 
@@ -321,6 +380,16 @@ Zurücksetzen: `Remove-Item Env:KAYAK_*` oder neues Fenster.
      - Crop Soft (weiche Kanten) kann OBS nicht ohne Plugin; Codes noch nicht erfasst. TFT-Werte von OBS zurück
        ans Panel bräuchten einen Frame-Mitschnitt (Rückmelde-Records unbekannt).
      - Unbekannte Regler-Varianten erscheinen einmal pro Muster als `[REGLER] neu/unbekannt`.
+   - **Wipe Normal/Reverse (09.10.):** nach jedem Wipe wird „Umkehren“ (luma_invert) automatisch umgeschaltet →
+     nächster Wipe = Rückweg; Muster-/Typwechsel beginnt wieder normal. Aus: `"nr": false` / `KAYAK_WIPE_NR=0`.
+   - **Bewusste Entscheidungen (10.10.):** Key-Lampen bleiben wie sie sind. Keine Rückmeldung OBS → Panel für PGM/PST:
+     **das Panel gibt vor, was sichtbar ist** (Klicks in OBS werden nicht ans Panel gespiegelt).
+   - **Nach den Ferien (echter Frame ab 19.10.):**
+     1. Lizenz-Keys vom alten Mischer eintragen → 96 echte Eingänge (Keys sind meist an den Frame gebunden).
+     2. Neuer Referenz-Mitschnitt (Mirroring): Panel-Start → softframe_data (appli.ini/state.bin u. a.) neu ziehen.
+     3. TFT-Mitschnitt: Key 1 (+ Key 2) delegiert, Locate X/Y/Twist, Size, Crop R/L/T/B, OPAC/GAIN/CLIP drehen
+        → Rückmelde-Records finden → echte Zahlenwerte aus OBS ins TFT.
+     4. Danach: Shift 10–15 auf echte Eingänge 25–30 (EXTRA-Umleitung entfällt), Tally über Eingang 32.
      - **Keyer-Encoder (v5d):** `06 00 c5 00 [20..23 = Key 1..4] [Parameter] [int16]`. OPAC = `0d`;
        GAIN/CLIP je Key-Typ: `30/2f` (Key 1), `2d/2c` (Key 2, 3), `28/27` (Key 4).
        OBS: Filter an der Quelle (gilt in allen Szenen!): „Kayak Opacity“ (color_filter_v2, opacity 0..1),
