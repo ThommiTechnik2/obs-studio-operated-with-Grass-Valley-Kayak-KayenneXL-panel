@@ -1,6 +1,6 @@
 # Kayak Soft-Frame – Projektstatus
 
-**Stand: Mittwoch, 14.10.2026 — v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
+**Stand: Freitag, 23.10.2026 — v5y (TFT-Zahlenwerte inkl. Twist + Save/Load Application). Vorher: 14.10. v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
 M/E-Tasten, PST, CUT, AUTO, Hebel, Blendzeit über Source Switcher `M_E1_PGM`–`M_E3_PGM`, Vorschau über `M_E1_PVW`–`M_E3_PVW`
 (Multiview). M/E-Taste n = n-te Quelle der Switcher-Liste. M/E1–3 liegen auf P/P-Taste 13–15 (Szenen „M/E1–3“).
 Start: `node kayak-softframe-v5u.js` (M/Es per Standard an, `KAYAK_MES=3`; ersetzt `KAYAK_CFG31="26,27,28,29=84"`).
@@ -415,6 +415,29 @@ Zurücksetzen: `Remove-Item Env:KAYAK_*` oder neues Fenster.
 - Kurze Pakete aus Mitschnitten per UDP-Längenfeld zuschneiden (Ethernet-Füllbytes)
 - Tally-Block 1 befüllen (bricht die Tasten)
 - Tally-Vorlagen aus Mitschnitten mit laufender Blende verwenden
+
+## 11. Echter Frame, 23.10.2026 (Mitschnitte boot_real, tft, tft_num) – v5w
+
+Lizenzen (96 Inputs) gestrichen: nicht nötig, das Soft-Frame meldet die Input-Anzahl selbst.
+
+**TFT-Zahlenwerte entschlüsselt (v5w setzt sie um, am Panel noch zu testen):**
+- Drehgeber `07 00 46 00 [a1..a4] [Sub] [Achse] [int16]`: 1024 Einheiten = 1 Anzeigeeinheit (Sub 02: Achse 1 Size, 2 X, 3 Y, 4 Twist; Sub 29: Achse 6 rechts, 7 links, 8 oben, 9 unten).
+- Zifferneingabe am TFT sendet den **Absolutwert**: `09 00 28 00 [a1..a4] [Sub] [Achse] [Float]` (Anzeigeeinheiten, Dezimalwerte gehen).
+  Opacity/Clip: `06 00 25 00 [20..23] [Id] [u16]`, Id 0d = Opacity (0..4096 = 0..100 %), 30 = Clip Hi (−100..300 %), 2f = Clip Low (−200..200 %).
+- Frame-Rückmeldung (Multicast, nur nach Änderungen, nicht beim Boot): Locate/Size als Float-Record (Länge 44) plus abgeleiteter Record (76), Crop als Record (56),
+  Opacity/Clip als `85`-Records; Clip schickt zusätzlich Id 31 = (2(L+H)−2048)/3 und Id 32 = 2047−2L+2H.
+- Crop-Bereich am Frame: oben/unten ±9, links/rechts ±16 (16:9).
+- Twist (Z) = 4. Float im Locate-Record (Mitschnitt twist.pcapng), Zifferneingabe `09 00 28 00 a1 02 04 [Float]`. Offen: andere Keyer-Typen (Ids 2d/2c, 28/27).
+**Save/Load Application (Mitschnitt saveload.pcapng, v5x, am Panel noch zu testen):**
+- Save am Panel: Panel meldet Name (`39 23 00 01 ..`), Pfad (`3f 27 00 23 00 02 [IP] ..`) und startet mit `09 00 e8 22 02 29 [IP]`.
+  Der **Frame** schreibt dann seine Dateien per TFTP-WRQ **ins Panel** (Port 69 des Panels; devices.ini, appli.ini, state.bin, pattmemo/usrwipes, keymem,
+  TE-Effects, Playlist, TiM/E-Memos) und meldet je Datei per Unicast `22 02 2b [IP60] 00 [Name] [Nr] 00`. Abschluss `30 01 0a ..` und `22 02 2a` („storing done“);
+  danach speichert das Panel seine eigenen Dateien (appli_cp.ini, state_cp.bin, MaKE-Memo, SatPanel Macros) lokal (IP63-Teil im Status).
+- Load: Panel sendet `ff 42 00 22 02 20 [IP][IP] [Name] [Pfad] 03`, der Frame **holt** die Dateien per TFTP-RRQ (Meldung `22 02 22`), Abschluss `30 01 0b` + `22 02 21`;
+  danach meldet sich das Panel neu an (`33 30 01 04`) und lädt appli.ini/state.bin und die übrigen Dateien vom Frame wie beim Boot.
+- v5x baut beides nach (devices.ini/appli.ini/state.bin aus den eigenen Dateien, alle anderen leer). Abschalten: `KAYAK_SAVELOAD=0`.
+- Zu prüfen: ob nach „Save“ + Neustart das Panel die gespeicherte appli_cp.ini wirklich wieder verwendet (Batterie leer!) bzw. nach dem Boot ein „Load“ nötig ist.
+- Umschalter: `KAYAK_TFT=0` (Rückmeldung aus), `KAYAK_TFT_ONDELEGATE=0`, `KAYAK_TFT_SIZE` (Startwert Size, Standard 100).
 
 ## 10. Arbeits-Hinweise
 
