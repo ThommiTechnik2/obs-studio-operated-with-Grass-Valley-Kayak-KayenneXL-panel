@@ -13,6 +13,9 @@
 // KAYAK SOFT-FRAME v5i (12.10.2026): KAYAK_CFG31 ersetzt die Tabelle auch im Multicast-Anfangsstrom
 // KAYAK SOFT-FRAME v5h (12.10.2026): KAYAK_CFG31 fuer die ganze Tabelle; Schalter 25-28 = M/E 0-3 vorhanden, 29 = Anzahl M/Es (unteres Halbbyte)
 // KAYAK SOFT-FRAME v5g (12.10.2026): Versuchsmodus Systemtabelle 30 01 31 (KAYAK_CFG31) - M/E-Boards?
+// KAYAK SOFT-FRAME v5y (23.10.2026): + Twist-Wert (Z) im TFT
+// KAYAK SOFT-FRAME v5x (23.10.2026): Save/Load Application wie der echte Frame (Frame schreibt/liest per TFTP im Panel)
+// KAYAK SOFT-FRAME v5w (23.10.2026): TFT-Zahlenwerte (Locate/Size/Crop/Opacity/Clip) wie der echte Frame, Zifferneingabe
 // KAYAK SOFT-FRAME v5f (11.10.2026): Panel-Applikation speichern/laden (TFTP-Schreiben -> Ordner panel_store)
 // KAYAK SOFT-FRAME v5e (11.10.2026): eigene appli.ini im Ordner hat Vorrang (KAYAK_APPLI_FILE)
 // KAYAK SOFT-FRAME v5d (08.10.2026): Keyer-Encoder OPAC/GAIN/CLIP -> OBS-Filter Opacity + Luma Key
@@ -545,6 +548,84 @@ function keyGroupRecs() {
   for (const g of ['74', '75']) r.push(rec('00' + g + '0102'), rec('00' + g + '1300'), rec('00' + g + '5000'), rec('00' + g + '8400'));
   return r;
 }
+
+// ================= v5w (23.10.2026): TFT-Zahlenwerte (Mitschnitte am echten Frame) =================
+// Der Frame meldet dem Panel nach jeder Aenderung die Absolutwerte (Multicast):
+//   Locate/Size : Record 9f [Len=44]  00 a1+k 02 00  [Float Size][Float X][Float Y][-0.0] ...   (Anzeigeeinheiten)
+//                 Record 9f [Len=76]  00 a1+k 03 00  [X*Size][Y*Size] ...                        (abgeleitet)
+//   Crop        : Record 9f [Len=56]  00 a1+k 29 00  [?][?][1.0][1.0][1.0][rechts][links][oben][unten] ...
+//   Opacity     : 85 00 [20+k] 0d [u16 0..4096 = 0..100 %]
+//   Clip        : 85 00 [20+k] 2f [Low u16] / 30 [Hi u16] / 31 [(2(L+H)-2048)/3] / 32 [2047-2L+2H]
+//                 Low: -200..+200 %, Hi: -100..+300 % (je 0..4096)
+// Panel -> Frame: Drehgeber = Delta in 1/1024 Anzeigeeinheit (07 00 46 ...) bzw. Rohwert (06 00 c5 ...);
+//   Zifferneingabe = Absolutwert: 09 00 28 00 [a1+k] [sub] [achse] [Float] bzw. 06 00 25 00 [20+k] [id] [u16].
+const TFT_FB = process.env.KAYAK_TFT !== '0';
+const KV_UNIT = 1024;
+const HI_IDS = [0x30, 0x2d, 0x28], LO_IDS = [0x2f, 0x2c, 0x27];
+const KV = [0, 1, 2, 3].map(() => ({ size: Number(process.env.KAYAK_TFT_SIZE || 100), x: 0, y: 0, tw: 0, crop: [0, 0, 0, 0], opac: 4096, lo: 2048, hi: 2048, ids: [0x30, 0x2f] }));
+const A103_TPL = Buffer.from('00a103000000c13e0400a0bb000000800000c13e0400a0bb0000000000000000000000000000000000000000000000000000008000000000000000004b59863c00000000000000000000803f', 'hex');
+function rec9f(body) { const h = Buffer.alloc(3); h[0] = 0x9f; h.writeUInt16LE(body.length, 1); return Buffer.concat([h, body]); }
+function w16(v) { const b = Buffer.alloc(2); b.writeUInt16LE(v & 0xffff); return b.toString('hex'); }
+// Crop-Bereich am echten Frame (Angabe 23.10.): rechts/links +-16, oben/unten +-9 (16:9)
+const CROP_MAX = [16, 16, 9, 9];
+function cropClamp(idx, v) { return Math.max(-CROP_MAX[idx], Math.min(CROP_MAX[idx], v)); }
+function kvClamp(v) { return Math.max(0, Math.min(4096, Math.round(v))); }
+function kvLocateRecs(i) {
+  const s = KV[i], a = Buffer.alloc(44); a[1] = 0xa1 + i; a[2] = 0x02;
+  a.writeFloatLE(s.size, 4); a.writeFloatLE(s.x, 8); a.writeFloatLE(s.y, 12); if (s.tw) a.writeFloatLE(s.tw, 16); else a.writeUInt32LE(0x80000000, 16); a.writeUInt32LE(0x80000000, 28);   // Twist = 4. Float (Mitschnitt twist.pcapng)
+  const b = Buffer.from(A103_TPL); b[1] = 0xa1 + i;
+  b.writeFloatLE(s.x * s.size, 4); b.writeFloatLE(s.y * s.size, 8); b.writeFloatLE(s.x * s.size, 16); b.writeFloatLE(s.y * s.size, 20);
+  return [rec9f(a), rec9f(b)];
+}
+function kvCropRec(i) {
+  const b = Buffer.alloc(56); b[1] = 0xa1 + i; b[2] = 0x29;
+  for (const k of [2, 3, 4]) b.writeFloatLE(1, 4 + 4 * k);
+  for (let k = 0; k < 4; k++) b.writeFloatLE(KV[i].crop[k], 4 + 4 * (5 + k));
+  return rec9f(b);
+}
+function kvClipRecs(i) {
+  const s = KV[i], g = hex2(0x20 + i), r = [rec('00' + g + hex2(s.ids[1]) + w16(s.lo)), rec('00' + g + hex2(s.ids[0]) + w16(s.hi))];
+  if (s.ids[0] === 0x30) {
+    r.push(rec('00' + g + '31' + w16(Math.max(-1, Math.floor((2 * (s.lo + s.hi) - 2048) / 3)))), rec('00' + g + '32' + w16(2047 - 2 * s.lo + 2 * s.hi)));
+  }
+  return r;
+}
+const kvPending = [new Set(), new Set(), new Set(), new Set()]; let kvTimer = null;
+function kvSend(i, part) {
+  if (!TFT_FB) return;
+  kvPending[i].add(part);
+  if (kvTimer) return;
+  kvTimer = setTimeout(() => {
+    kvTimer = null;
+    for (let k = 0; k < 4; k++) {
+      const p = kvPending[k]; if (!p.size) continue;
+      const r = [];
+      if (p.has('loc')) r.push(...kvLocateRecs(k));
+      if (p.has('crop')) r.push(kvCropRec(k));
+      if (p.has('opac')) r.push(rec('00' + hex2(0x20 + k) + '0d' + w16(KV[k].opac)));
+      if (p.has('clip')) r.push(...kvClipRecs(k));
+      p.clear();
+      if (r.length) sendMc(packet(r), '239.168.5.60');
+    }
+  }, 40);
+}
+function kvSendAll(i) { for (const p of ['loc', 'crop', 'opac', 'clip']) kvSend(i, p); }
+function kvEncoder(key, sub, axis, v) {   // Drehgeber-Delta (1/1024 Einheit)
+  const s = KV[key], d = v / KV_UNIT;
+  if (sub === 0x02) {
+    if (axis === 1) s.size += d; else if (axis === 2) s.x += d; else if (axis === 3) s.y += d; else if (axis === 4) s.tw += d; else return;
+    kvSend(key, 'loc');
+  } else if (sub === 0x29 && axis >= 6 && axis <= 9) { s.crop[axis - 6] = cropClamp(axis - 6, s.crop[axis - 6] + d); kvSend(key, 'crop'); }
+}
+function kvKeyer(key, id, v, absolute) {  // Opacity / Clip; liefert Delta zurueck
+  const s = KV[key]; let old, part;
+  if (id === 0x0d) { old = s.opac; s.opac = kvClamp(absolute ? v : old + v); part = 'opac'; }
+  else if (HI_IDS.includes(id)) { old = s.hi; s.hi = kvClamp(absolute ? v : old + v); s.ids[0] = id; part = 'clip'; }
+  else if (LO_IDS.includes(id)) { old = s.lo; s.lo = kvClamp(absolute ? v : old + v); s.ids[1] = id; part = 'clip'; }
+  else return 0;
+  kvSend(key, part);
+  return (id === 0x0d ? s.opac : HI_IDS.includes(id) ? s.hi : s.lo) - old;
+}
 let keyReqTimer = null;
 // Delegate Key 1 schickt KEIN a0 26 (Log 08.10.), nur die Abfrage-Salve 05 00 24 00 [Gruppe] 50 fuer die
 // drei NICHT delegierten Keys. Die fehlende Gruppe = neu delegierter Key (gilt auch fuer Key 2..4).
@@ -555,6 +636,7 @@ function setDelegate(i, how) {
   const changed = i !== keyDelIdx; keyDelIdx = i;
   if (changed || how === 'a026') log(`[KEY] Delegate Key${i + 1}${how === 'abfrage' ? ' (aus Abfrage erkannt)' : how === 'regler' ? ' (aus Regler erkannt)' : ''}`);
   OBS.selectItem(i, mix.pst);
+  if (changed && process.env.KAYAK_TFT_ONDELEGATE !== '0') kvSendAll(i);
 }
 function onKeyRequest(g, sub) {
   if (sub === 0x50) keyReqGroups.add(g);
@@ -779,6 +861,7 @@ function handleKey(msg, rinfo) {
     if (kind) {
       const key = msg[4] - 0x20;
       if (key !== keyDelIdx) setDelegate(key, 'regler');
+      kvKeyer(key, msg[5], msg.readInt16LE(6), false);
       OBS.keyFilter(key, kind, msg.readInt16LE(6), mix.pst); return true;
     }
   }
@@ -793,15 +876,28 @@ function handleKey(msg, rinfo) {
   //   Untergruppe 29: Crop (Edge), Achse 06 = rechts, 07 = links, 08 = oben, 09 = unten (Uhrzeiger + = mehr)
   //   Die Key-Nummer steckt in der Nachricht -> Ziel = n-te Quelle von unten in PST (wie Delegate Key n).
   if (msg.length === 9 && msg[2] === 0x46 && msg[3] === 0x00 && msg[4] >= 0xa1 && msg[4] <= 0xa4) {
-    const key = msg[4] - 0xa1, sub = msg[5], axis = msg[6], v = msg.readInt16LE(7);
-    let ax = null, val = v;
-    if (sub === 0x02 && axis === 0x01) ax = 0x30;
-    else if (sub === 0x02 && axis >= 0x02 && axis <= 0x04) { ax = { 2: 0x14, 3: 0x15, 4: 0x17 }[axis]; val = v / 2; if (ax === 0x17) val = -val; }
-    else if (sub === 0x29 && axis >= 0x06 && axis <= 0x09) ax = 0x41 + (axis - 6);
-    if (ax !== null) {
-      if (key !== keyDelIdx) setDelegate(key, 'regler');
-      OBS.joy(msg[4], ax, val, mix.pst); return true;
+    if (regler46(msg[4] - 0xa1, msg[5], msg[6], msg.readInt16LE(7))) return true;
+  }
+  // v5w: Zifferneingabe am TFT = Absolutwert (Mitschnitt 23.10.): 09 00 28 00 [a1+k] [sub 02/29] [Achse] [Float]
+  if (msg.length === 11 && msg[2] === 0x28 && msg[3] === 0x00 && msg[4] >= 0xa1 && msg[4] <= 0xa4 && (msg[5] === 0x02 || msg[5] === 0x29)) {
+    const key = msg[4] - 0xa1, sub = msg[5], axis = msg[6], f = msg.readFloatLE(7), s = KV[key];
+    const cur = sub === 0x02 ? [null, s.size, s.x, s.y, s.tw][axis] : (axis >= 6 && axis <= 9 ? s.crop[axis - 6] : null);
+    if (cur != null && Number.isFinite(f)) {
+      log(`[TFT] Key${key + 1} ${sub === 0x02 ? ['', 'Size', 'X', 'Y', 'Twist'][axis] : 'Crop ' + ['rechts', 'links', 'oben', 'unten'][axis - 6]} = ${f}`);
+      regler46(key, sub, axis, Math.round((f - cur) * KV_UNIT));
+      if (sub === 0x02) { if (axis === 1) s.size = f; else if (axis === 2) s.x = f; else if (axis === 3) s.y = f; else s.tw = f; kvSend(key, 'loc'); }
+      else { s.crop[axis - 6] = cropClamp(axis - 6, f); kvSend(key, 'crop'); }
+      return true;
     }
+  }
+  // v5w: Opacity/Clip per Zifferneingabe: 06 00 25 00 [20+k] [id] [u16 0..4096]
+  if (msg.length === 8 && (msg[2] & 0x7f) === 0x25 && msg[3] === 0x00 && msg[4] >= 0x20 && msg[4] <= 0x23 && (msg[5] === 0x0d || HI_IDS.includes(msg[5]) || LO_IDS.includes(msg[5]))) {
+    const key = msg[4] - 0x20, id = msg[5], d = kvKeyer(key, id, msg.readUInt16LE(6), true);
+    const kind = id === 0x0d ? 'opac' : HI_IDS.includes(id) ? 'gain' : 'clip';
+    log(`[TFT] Key${key + 1} ${kind === 'opac' ? 'Opacity' : kind === 'gain' ? 'Clip Hi' : 'Clip Low'} = ${msg.readUInt16LE(6)} (Delta ${d})`);
+    if (key !== keyDelIdx) setDelegate(key, 'regler');
+    if (d) OBS.keyFilter(key, kind, d, mix.pst);
+    return true;
   }
   // noch unbekannte Regler/Joystick-Varianten einmal pro Muster melden
   if (msg.length === 9 && msg[2] === 0x46 && msg[3] === 0x00) {
@@ -823,6 +919,125 @@ function handleKey(msg, rinfo) {
   return false;
 }
 
+// v5w: Drehgeber Locate/Size/Crop -> Modell (TFT-Rueckmeldung) + OBS
+function regler46(key, sub, axis, v) {
+  let ax = null, val = v;
+  if (sub === 0x02 && axis === 0x01) ax = 0x30;
+  else if (sub === 0x02 && axis >= 0x02 && axis <= 0x04) { ax = { 2: 0x14, 3: 0x15, 4: 0x17 }[axis]; val = v / 2; if (ax === 0x17) val = -val; }
+  else if (sub === 0x29 && axis >= 0x06 && axis <= 0x09) ax = 0x41 + (axis - 6);
+  if (ax === null) return false;
+  if (key !== keyDelIdx) setDelegate(key, 'regler');
+  kvEncoder(key, sub, axis, v);
+  OBS.joy(0xa1 + key, ax, val, mix.pst);
+  return true;
+}
+
+
+// ================= v5x (23.10.2026): Save/Load Application wie der echte Frame (Mitschnitt saveload.pcapng) =================
+// Ablauf Save (Panel-Menue "Save"): Panel schickt Name (39 23 00 01 ..), Pfad (3f 27 00 23 00 02 ..) und den Befehl
+//   09 00 e8 22 02 29 [IP]. Der FRAME schreibt dann seine Dateien per TFTP INS PANEL (WRQ auf Port 69 des Panels) und
+//   meldet je Datei per Unicast "22 02 2b [IP60] 00 [Laenge][Name] [Nr] 00". Am Ende "30 01 0a ..." + "22 02 2a" (storing done);
+//   danach speichert das Panel seine eigenen Dateien (appli_cp.ini, state_cp.bin ...) lokal.
+// Load: Panel schickt "ff 42 00 22 02 20 [IP][IP] [Name] [Pfad] 03"; der Frame HOLT die Dateien per TFTP (RRQ) aus dem Panel
+//   ("22 02 22" je Datei), am Ende "30 01 0b ..." + "22 02 21". Danach meldet sich das Panel neu an (33 30 01 04).
+// Inhalt der Frame-Dateien: devices.ini/appli.ini/state.bin aus unseren TFTP-Dateien, alle anderen leer (Soft-Frame hat keine).
+// Abschalten: KAYAK_SAVELOAD=0
+const SAVELOAD = process.env.KAYAK_SAVELOAD !== '0';
+const APP = { name: '20230203 DUPLEX1-NORM', path: '/bd/appli/20230203 DUPLEX1-NORM' };
+let appBusy = false;
+function ipBuf(ip) { return Buffer.from(ip.split('.').map(Number)); }
+function strL(s) { const b = Buffer.from(s, 'latin1'); return Buffer.concat([Buffer.from([b.length]), b]); }
+function appRec(body) {
+  const r = body.length < 0x1f ? Buffer.concat([Buffer.from([0x80 | body.length]), body]) : rec9f(body);
+  const l = Buffer.alloc(2); l.writeUInt16LE(r.length); return Buffer.concat([l, r]);
+}
+function appSteps() {
+  const P = APP.path, cp = (n) => ({ save: '/cpStore/' + n, load: '/cpStore/' + n });
+  const mf = (n) => ({ save: `${P}/mf1\\${n}`, load: `${P}\\mf1\\${n}` });
+  return [
+    ['devices.ini', [{ save: '/devFiles/devices.ini', load: `${P}\\devices.ini`, data: () => tftpFiles.get('devices.ini') }]],
+    ['appli.ini', [{ ...mf('appli.ini'), data: () => localAppli() || tftpFiles.get('appli.ini') }]],
+    ['state.bin', [{ ...mf('state.bin'), data: () => tftpFiles.get('state.bin') }]],
+    ['PattMemory & UserWipes', [cp('pattmemo.mf1'), cp('usrwipes.mf1')]],
+    ['KeyMemory App0', [mf('keymem.bin')]],
+    ['TE-Effect PP', [cp('te_eff0.mf1')]], ['TE-Effect ME1', [cp('te_eff1.mf1')]], ['TE-Effect ME2', [cp('te_eff2.mf1')]],
+    ['TE-Effect ME3', [cp('te_eff3.mf1')]], ['TE-Effect EDPM', [cp('te_effEDpm.mf1')]],
+    ['DVx Effects', []], ['Playlist', [cp('playlist.mf1')]],
+    ['TiM/E-Memo PP', [cp('tmem_me0.mf1')]], ['TiM/E-Memo M/E1', [cp('tmem_me1.mf1')]], ['TiM/E-Memo M/E2', [cp('tmem_me2.mf1')]],
+    ['TiM/E-Memo M/E3', [cp('tmem_me3.mf1')]], ['TiM/E-Memo App0', [cp('tmem_app.mf1')]], ['TiM/E-Memo M/E4', [cp('tmem_me4.mf1')]],
+  ];
+}
+function tftpClient(mode, remote, data, done) {
+  const t = dgram.createSocket('udp4'); let tid = null, block = 0, tries = 0, timer = null, finished = false, lastLen = 512;
+  const fin = (ok, why) => { if (finished) return; finished = true; clearTimeout(timer); try { t.close(); } catch (e) { /* */ } if (!ok) log(`[SAVELOAD] TFTP ${mode} ${remote}: ${why}`); done(ok); };
+  const out = (b) => t.send(b, tid || 69, PANEL_IP);
+  const req = () => out(Buffer.concat([Buffer.from([0, mode === 'put' ? 2 : 1]), Buffer.from(remote + '\0octet\0', 'latin1')]));
+  const dataPkt = (n) => { const d = data.slice((n - 1) * 512, n * 512); lastLen = d.length; const h = Buffer.alloc(4); h.writeUInt16BE(3, 0); h.writeUInt16BE(n & 0xffff, 2); return Buffer.concat([h, d]); };
+  let lastPkt = null;
+  const send = (b) => { lastPkt = b; out(b); clearTimeout(timer); timer = setTimeout(retry, 1500); };
+  const retry = () => { if (++tries > 4) return fin(false, 'Zeitüberschreitung'); out(lastPkt); timer = setTimeout(retry, 1500); };
+  t.on('error', (e) => fin(false, e.message));
+  t.on('message', (m, r) => {
+    if (r.address !== PANEL_IP) return;
+    const op = m.readUInt16BE(0); tid = tid || r.port; tries = 0;
+    if (op === 5) return fin(false, 'Panel meldet Fehler: ' + m.slice(4, m.length - 1).toString());
+    if (mode === 'put' && op === 4) {
+      const ack = m.readUInt16BE(2);
+      if (ack !== (block & 0xffff)) return;
+      if (block > 0 && lastLen < 512) return fin(true);
+      block++; send(dataPkt(block));
+    } else if (mode === 'get' && op === 3) {
+      const n = m.readUInt16BE(2), a = Buffer.alloc(4); a.writeUInt16BE(4, 0); a.writeUInt16BE(n, 2);
+      t.send(a, tid, PANEL_IP);
+      if (m.length - 4 < 512) fin(true);
+    }
+  });
+  t.bind({ address: FRAME_IP, port: 0 }, () => { req(); lastPkt = Buffer.concat([Buffer.from([0, mode === 'put' ? 2 : 1]), Buffer.from(remote + '\0octet\0', 'latin1')]); timer = setTimeout(retry, 1500); });
+}
+function runApplication(kind) {   // 'save' | 'load'
+  if (appBusy) { log('[SAVELOAD] laeuft schon'); return; }
+  appBusy = true;
+  const save = kind === 'save', steps = appSteps(), ip60 = FRAME_IP_BYTES, ip63 = ipBuf(PANEL_IP);
+  log(`[SAVELOAD] ${save ? 'Save' : 'Load'} Application "${APP.name}" (${APP.path})`);
+  const sendU = (b) => s56629.send(b, 56629, PANEL_IP);
+  const nextStep = (i) => {
+    if (i >= steps.length) {
+      const body = Buffer.concat([Buffer.from([0x30, 0x01, save ? 0x0a : 0x0b]), ip60, ip63, ip63, Buffer.from([0x00, 0x06]), strL(APP.path), strL(APP.name)]);
+      sendU(appRec(body));
+      sendU(appRec(Buffer.concat([Buffer.from([0x22, 0x02, save ? 0x2a : 0x21]), ip60, Buffer.from([0, 0])])));
+      appBusy = false; log(`[SAVELOAD] ${save ? 'Save' : 'Load'} fertig`);
+      return;
+    }
+    const [name, files] = steps[i];
+    sendU(appRec(Buffer.concat([Buffer.from([0x22, 0x02, save ? 0x2b : 0x22]), ip60, Buffer.from([0x00]), strL(name), Buffer.from([i + 1, 0x00])])));
+    const nextFile = (j) => {
+      if (j >= files.length) return setTimeout(() => nextStep(i + 1), 20);
+      const fl = files[j];
+      if (save) tftpClient('put', fl.save, (fl.data && fl.data()) || Buffer.alloc(0), (ok) => { if (!ok) log(`[SAVELOAD] ${fl.save} nicht geschrieben`); nextFile(j + 1); });
+      else tftpClient('get', fl.load, null, (ok) => { if (!ok) log(`[SAVELOAD] ${fl.load} nicht geholt`); nextFile(j + 1); });
+    };
+    nextFile(0);
+  };
+  nextStep(0);
+}
+// Panel-Meldungen zu Save/Load; true = behandelt
+function handleAppControl(msg) {
+  if (!SAVELOAD || msg.length < 8) return false;
+  if (msg[2] === 0x39 && msg[3] === 0x23 && msg[4] === 0x00 && msg[5] === 0x01 && msg[6] === msg.length - 7) {
+    APP.name = msg.slice(7).toString('latin1'); log(`[SAVELOAD] Applikationsname: ${APP.name}`); return true;
+  }
+  if (msg[2] === 0x3f && msg[3] === 0x27 && msg[4] === 0x00 && msg[5] === 0x23 && msg[6] === 0x00 && msg[7] === 0x02 && msg.length > 13 && msg[12] === msg.length - 13) {
+    APP.path = msg.slice(13).toString('latin1'); log(`[SAVELOAD] Applikationspfad: ${APP.path}`); return true;
+  }
+  if (msg.length === 11 && msg[2] === 0xe8 && msg[3] === 0x22 && msg[4] === 0x02 && msg[5] === 0x29) { runApplication('save'); return true; }
+  if (msg[2] === 0xff && msg[3] === 0x42 && msg[4] === 0x00 && msg[5] === 0x22 && msg[6] === 0x02 && msg[7] === 0x20 && msg.length > 17) {
+    const nl = msg[16]; APP.name = msg.slice(17, 17 + nl).toString('latin1');
+    const pl = msg[17 + nl]; if (pl && msg.length >= 18 + nl + pl) APP.path = msg.slice(18 + nl, 18 + nl + pl).toString('latin1');
+    runApplication('load'); return true;
+  }
+  return false;
+}
+
 function on56629(msg, rinfo) {
   if (rinfo.address !== PANEL_IP) return;
   const head = msg.slice(0, 6).toString('hex');
@@ -832,6 +1047,7 @@ function on56629(msg, rinfo) {
     scheduleItry('Panel sucht');
     return;
   }
+  if (connected && handleAppControl(msg)) return;
   // Panel-IAm -> nach 174ms unser Confirm, dann Multicast-Strom
   if (head.startsWith('2a003f27')) {
     if (!connected) {
