@@ -1,6 +1,6 @@
 # Kayak Soft-Frame – Projektstatus
 
-**Stand: Freitag, 23.10.2026 — v5y (TFT-Zahlenwerte inkl. Twist + Save/Load Application). Vorher: 14.10. v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
+**Stand: Samstag, 24.10.2026 — FINALE VERSION v5zd (README EN/DE aktualisiert, Batterie/SSD-Tausch am Panel folgt) — v5zd (Save/Load mit gemeldetem App-Namen) auf v5zc (Versuch M/E-Tally, nur mit KAYAK_ME_TALLY) auf v5zb (Encoder-Empfindlichkeit) auf v5za (Clip Low/Hi = Luma Min/Max) auf v5z (TFT-Werte absolut/proportional nach OBS + Rückmeldung OBS → TFT; braucht das neue kayak-obs-standard.js). Vorher: 23.10. v5y (TFT-Zahlenwerte inkl. Twist + Save/Load Application), 14.10. v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
 M/E-Tasten, PST, CUT, AUTO, Hebel, Blendzeit über Source Switcher `M_E1_PGM`–`M_E3_PGM`, Vorschau über `M_E1_PVW`–`M_E3_PVW`
 (Multiview). M/E-Taste n = n-te Quelle der Switcher-Liste. M/E1–3 liegen auf P/P-Taste 13–15 (Szenen „M/E1–3“).
 Start: `node kayak-softframe-v5u.js` (M/Es per Standard an, `KAYAK_MES=3`; ersetzt `KAYAK_CFG31="26,27,28,29=84"`).
@@ -287,7 +287,7 @@ Zurücksetzen: `Remove-Item Env:KAYAK_*` oder neues Fenster.
   Switcher-Liste (Szenen-Position führte zu Versatz um 1). v5u: `KAYAK_MES` (Standard 3).
   Dateien: `kayak-softframe-v5u.js`, `kayak-obs-standard.js` (alte `kayak-obs.js` nicht mehr benutzt).
   README (EN/DE) aktualisiert, ohne Datencodes.
-  Offen: Tally-Farben M/E (Bus-Lampen nur BRIGHT).
+  Tally-Farben M/E: bewusst nicht weiterverfolgt (Bus-Lampen nur BRIGHT, v5zc-Versuch ohne Wirkung, 24.10.).
 - ✅ **Tastenklick aus (14.10., v5v, bestätigt):** Persönliche Einstellungen des Panels liegen in Objekt `21 05`
   (01 = Beeper, 03 = Tastenklick; Tabelle `CMpCpPersonalSettings::kwFuncCpPSet` in ds0104.704). Soft-Frame sendet 8 s nach
   dem Confirm `05 00 25 21 05 03 00` (Tastenklick aus). `KAYAK_KEYCLICK=on|off|keep` (Standard off),
@@ -427,7 +427,7 @@ Lizenzen (96 Inputs) gestrichen: nicht nötig, das Soft-Frame meldet die Input-A
 - Frame-Rückmeldung (Multicast, nur nach Änderungen, nicht beim Boot): Locate/Size als Float-Record (Länge 44) plus abgeleiteter Record (76), Crop als Record (56),
   Opacity/Clip als `85`-Records; Clip schickt zusätzlich Id 31 = (2(L+H)−2048)/3 und Id 32 = 2047−2L+2H.
 - Crop-Bereich am Frame: oben/unten ±9, links/rechts ±16 (16:9).
-- Twist (Z) = 4. Float im Locate-Record (Mitschnitt twist.pcapng), Zifferneingabe `09 00 28 00 a1 02 04 [Float]`. Offen: andere Keyer-Typen (Ids 2d/2c, 28/27).
+- Twist (Z) = 4. Float im Locate-Record (Mitschnitt twist.pcapng), Zifferneingabe `09 00 28 00 a1 02 04 [Float]`. Offen: M/E-Tally-Farben (der Test-Frame hat keine M/Es, später an anderem Frame oder durch Ausprobieren), andere Keyer-Typen (Ids 2d/2c, 28/27).
 **Save/Load Application (Mitschnitt saveload.pcapng, v5x, am Panel noch zu testen):**
 - Save am Panel: Panel meldet Name (`39 23 00 01 ..`), Pfad (`3f 27 00 23 00 02 [IP] ..`) und startet mit `09 00 e8 22 02 29 [IP]`.
   Der **Frame** schreibt dann seine Dateien per TFTP-WRQ **ins Panel** (Port 69 des Panels; devices.ini, appli.ini, state.bin, pattmemo/usrwipes, keymem,
@@ -438,6 +438,25 @@ Lizenzen (96 Inputs) gestrichen: nicht nötig, das Soft-Frame meldet die Input-A
 - v5x baut beides nach (devices.ini/appli.ini/state.bin aus den eigenen Dateien, alle anderen leer). Abschalten: `KAYAK_SAVELOAD=0`.
 - Zu prüfen: ob nach „Save“ + Neustart das Panel die gespeicherte appli_cp.ini wirklich wieder verwendet (Batterie leer!) bzw. nach dem Boot ein „Load“ nötig ist.
 - Umschalter: `KAYAK_TFT=0` (Rückmeldung aus), `KAYAK_TFT_ONDELEGATE=0`, `KAYAK_TFT_SIZE` (Startwert Size, Standard 100).
+
+**v5z (24.10.2026) – Heimtest gegen OBS (Quelle „Farbe“ 1920×1080) und Korrektur (noch am Panel/OBS zu testen):**
+- Befund: v5y rechnete Absolutwerte in riesige Relativschritte um (Size 50 → 49248×27702 px und OBS-Fehler „scaleX is too small or large“, X 10 → 40960 px; Crop blieb bei −2,5/0,27 hängen).
+- Neu: das **Modell im Soft-Frame ist die Wahrheit** (Size, X, Y, Twist, Crop in Panel-Einheiten) und wird **absolut** auf die OBS-Transformation abgebildet (`OBS.setKey`):
+  - Size: 100 = Quelle füllt die Leinwand (an Bildschirm angepasst), 50 = 960×540, 200 = 3840×2160; Bereich 1…400.
+  - X/Y: −100…+100 = ±Leinwandbreite bzw. ±Leinwandhöhe (±1920 / ±1080 px); 0/0 = Mitte; Y hoch = +. `KAYAK_XY_RANGE` ändert die Einheiten für die volle Leinwand.
+  - Crop: rechts/links ±16 = ganze Quellbreite, oben/unten ±9 = ganze Quellhöhe (negativ = in OBS 0); das sichtbare Bild bleibt beim Beschneiden an seinem Platz.
+  - Twist: Grad (Panel gegen den Uhrzeiger = +), in OBS als Drehung um die Bildmitte.
+  - Der OBS-Bezugspunkt (Oben Links, Mitte, …) ist egal; die Lage wird über das Bildzentrum gerechnet. Bounding-Box wird auf „Keine Begrenzung“ gestellt.
+  - Opacity absolut (0…4096 = 0…100 %), Clip Low → `luma_min`, Clip Hi → `luma_max` im OBS-Filter „Kayak Luma“ (Luma Key; Panel-Prozent 0…100 = 0…1, Glättung stellt man in OBS selbst ein) – ab v5za; v5z hatte Hi auf die Glättung gelegt. Opacity im Filter „Kayak Opacity“ (Farbkorrektur). Beide Filter sieht man in OBS per Rechtsklick auf die Quelle → Filter; sie werden beim ersten Drehen automatisch angelegt.
+- v5zb: Encoder-Empfindlichkeit als Faktor auf die Panel-Schritte (Beschleunigung macht das Panel selbst): `KAYAK_GAIN_SIZE`, `KAYAK_GAIN_XY`, `KAYAK_GAIN_TWIST` (je 1), `KAYAK_GAIN_CROP` (0,25, weil Crop zu grob war). Zifferneingabe unberührt. Opacity/Clip nicht skaliert.
+- **v5zc – Versuch M/E-Tally (geraten, kein Mitschnitt; der Frame mit M/Es ist an Studio Berlin verkauft, „XBar Tally“ in den Personal Settings hilft nicht):** `KAYAK_ME_TALLY=1` sendet je M/E drei Tally-Blöcke wie bei P/P (0 = PGM-Maske, 1 leer, 2 = PST-Maske), mit der M/E-Nummer im Byte vor der „02“ (Annahme: Ebenenbyte). `KAYAK_ME_TALLY=2` sendet stattdessen Blöcke 3…11 (3 pro M/E) ohne Ebenenbyte. Standard 0 = aus. **Ergebnis 24.10.: Modus 1 und 2 ohne Wirkung, die M/E-Tasten bleiben weiß (hell). Bewusst so belassen – Aufwand größer als Nutzen. Finale Version: v5zb (v5zc nur mit Versuchsschalter).** Zu beobachten: wird die M/E-PGM-Taste rot, springen Tasten zurück, reagiert das Panel noch? Log: `[M/E] M/E1 Tally-Versuch Modus …`.
+- **Save/Load am Soft-Frame bestätigt (24.10., v5zd, Name „21Broadcast“, ohne KAYAK_APPNAME):** Save und Load gehen. Vorher war Save gesperrt, vermutlich weil der Name im Save-Ablauf (alt: „20230203 DUPLEX1-NORM“) nicht zum gemeldeten „21Broadcast“ passte. Noch zu testen: Save → Neustart → übernimmt das Panel die gespeicherte appli_cp.ini (Batterie leer)?
+- (Vorgeschichte) Save im AppliControl-Menü gesperrt, Ursache war offen. Befund aus boot_real/boot_soft: Der echte Frame meldet beim Boot den Applikationsnamen `99 23 00 01 [Länge][Name]` (unicast + multicast, Name „20230203 DUPLEX1-NORM“); der Soft-Frame meldet standardmäßig „21Broadcast“ (`KAYAK_APPNAME`, seit v4f). Test: `KAYAK_APPNAME=orig`. v5x Save/Load nutzte fest den alten Namen (v5zd korrigiert). Noch fehlend: Foto der AppliControl-Seite im Soft-Frame-Betrieb + Mitschnitt vom Öffnen der Seite (was das Panel dabei vom Frame verlangt). Beim echten Frame ist die Liste „Available Applications“ vor dem ersten Save nur „default“, danach kommt der Name dazu.
+- Beobachtung 24.10.: X/Y 0 ergab −1/−0,5 px, weil Size ≈ 100,11 % statt 100 – kein Mapping-Fehler (erst Size 100 setzen, dann prüfen). Idee: Raste bei Size 100 ±0,2.
+- Joystick (kleine Schritte ±2 bzw. `c5`-Format) bleibt relativ wie bisher; das TFT folgt über die Abfrage.
+- **Rückmeldung OBS → TFT:** beim Delegieren von Key 1–4 wird die Quelle (n-te von unten in PST) aus OBS gelesen und ans TFT geschickt; solange ein Key delegiert ist, wird alle 1 s verglichen
+  (nicht innerhalb 1,5 s nach Panel-Eingabe) und nur bei Abweichung ans TFT gesendet. `KAYAK_TFT_POLL` (ms, Standard 1000, 0 = aus).
+- Rundlauftest Modell → OBS → Modell für alle Bezugspunkte und Drehungen bestanden (kein Panel-/OBS-Test mit echter Hardware).
 
 ## 10. Arbeits-Hinweise
 

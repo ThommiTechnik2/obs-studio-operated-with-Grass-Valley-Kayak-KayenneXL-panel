@@ -307,13 +307,14 @@ const JOY_CROP_AXES = { 0x41: 'cropRight', 0x42: 'cropLeft', 0x43: 'cropTop', 0x
 const joyState = { scene: null, id: null, name: '', tf: null, loading: false, last: 0,
   dx: 0, dy: 0, ds: 0, crop: { cropLeft: 0, cropRight: 0, cropTop: 0, cropBottom: 0 }, dcrop: false,
   timer: null, group: null };
-async function joyTarget(scene) {
+async function joyTarget(scene, idx) {
+  if (idx === undefined) idx = joySel.idx;
   const r = await request('GetSceneItemList', { sceneName: scene });
   if (!r || !r.sceneItems || !r.sceneItems.length) return null;
   const items = r.sceneItems.slice().sort((a, b) => b.sceneItemIndex - a.sceneItemIndex);   // oben -> unten
   let it;
   if (JOY_ITEM) it = items.find(x => x.sourceName === JOY_ITEM);
-  else if (joySel.idx != null) it = items.slice().reverse()[joySel.idx];                       // Key n = n-te von unten
+  else if (idx != null) it = items.slice().reverse()[idx];                       // Key n = n-te von unten
   else it = items[0];
   if (!it) return null;
   const t = await request('GetSceneItemTransform', { sceneName: scene, sceneItemId: it.sceneItemId });
@@ -413,6 +414,112 @@ async function joyReset(pstCode) {
   log(`[JOY] Reset "${t.name}" in "${scene}": ${what}`);
 }
 
+
+// ---------------- TFT-Werte (v5z): absolut + proportional, mit Rueckmeldung OBS -> TFT ----------------
+// Das Modell im Soft-Frame (Size, X, Y, Twist, Crop) ist in "Panel-Einheiten"; hier wird es auf die OBS-Transformation abgebildet:
+//   Size  : 100 = Quelle fuellt die Leinwand (An Bildschirm angepasst, z. B. 1920x1080), 50 = halb (960x540) ...  [1..400]
+//   X / Y : -100..+100 = -Leinwandbreite..+Leinwandbreite bzw. -Leinwandhoehe..+Leinwandhoehe (1920 / 1080 px), 0 = Mitte, Y hoch = +
+//   Crop  : rechts/links +-16 = ganze Quellbreite, oben/unten +-9 = ganze Quellhoehe (negativ = in OBS 0)
+//   Twist : Grad, Panel gegen den Uhrzeiger = + (OBS dreht im Uhrzeigersinn = +)
+// Der Bezugspunkt (Alignment: oben links, Mitte ...) der Quelle in OBS ist egal: die Lage wird ueber das Bildzentrum gerechnet.
+// Aenderungen: $env:KAYAK_XY_RANGE (Einheiten fuer volle Leinwand, Standard 100).
+const XY_RANGE = parseFloat(process.env.KAYAK_XY_RANGE || '100');
+const SIZE_MIN = 1, SIZE_MAX = 400;
+const CROP_UNITS = [16, 16, 9, 9];          // rechts, links, oben, unten
+let canvasCache = null;
+async function getCanvas() {
+  if (canvasCache) return canvasCache;
+  const v = await request('GetVideoSettings');
+  if (v && v.baseWidth) canvasCache = { cw: v.baseWidth, ch: v.baseHeight };
+  return canvasCache || { cw: 1920, ch: 1080 };
+}
+function anchorOff(al, w, h) {              // Ankerpunkt relativ zur Bildmitte (unrotiert)
+  return [(al & 1) ? -w / 2 : (al & 2) ? w / 2 : 0, (al & 4) ? -h / 2 : (al & 8) ? h / 2 : 0];
+}
+function rotate(x, y, deg) {
+  const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return [x * c - y * s, x * s + y * c];
+}
+function srcDims(tf, cv) { return [tf.sourceWidth || cv.cw, tf.sourceHeight || cv.ch]; }
+function fitScale(tf, cv) { const [sw, sh] = srcDims(tf, cv); return Math.min(cv.cw / sw, cv.ch / sh); }
+function mapToObs(m, tf, cv) {
+  const [sw, sh] = srcDims(tf, cv), al = tf.alignment || 0;
+  const k0 = fitScale(tf, cv);
+  const size = Math.max(SIZE_MIN, Math.min(SIZE_MAX, m.size));
+  const ratio = (tf.scaleX && tf.scaleY) ? Math.abs(tf.scaleY / tf.scaleX) : 1;
+  const sx = size / 100 * k0, sy = sx * ratio;
+  const cr = [0, 1, 2, 3].map(n => Math.max(0, Math.round(m.crop[n] / CROP_UNITS[n] * (n < 2 ? sw : sh))));
+  if (cr[0] + cr[1] > sw - 2) { const f = (sw - 2) / (cr[0] + cr[1]); cr[0] = Math.floor(cr[0] * f); cr[1] = Math.floor(cr[1] * f); }
+  if (cr[2] + cr[3] > sh - 2) { const f = (sh - 2) / (cr[2] + cr[3]); cr[2] = Math.floor(cr[2] * f); cr[3] = Math.floor(cr[3] * f); }
+  const W = sw * sx, H = sh * sy;            // ganze (unbeschnittene) Quelle
+  const w = (sw - cr[0] - cr[1]) * sx, h = (sh - cr[2] - cr[3]) * sy;   // sichtbarer Teil
+  const bcx = cv.cw / 2 + m.x / XY_RANGE * cv.cw, bcy = cv.ch / 2 - m.y / XY_RANGE * cv.ch;   // Mitte der ganzen Quelle
+  const vcx = bcx + ((cr[1] - cr[0]) * sx) / 2, vcy = bcy + ((cr[2] - cr[3]) * sy) / 2;       // Mitte des sichtbaren Teils
+  const rot = (((-m.tw) % 360) + 360) % 360;
+  const [ax, ay] = anchorOff(al, w, h), [rx, ry] = rotate(ax, ay, rot);
+  return { positionX: vcx + rx, positionY: vcy + ry, scaleX: sx, scaleY: sy, rotation: rot,
+    cropRight: cr[0], cropLeft: cr[1], cropTop: cr[2], cropBottom: cr[3], boundsType: 'OBS_BOUNDS_NONE' };
+}
+function mapFromObs(tf, cv) {
+  const [sw, sh] = srcDims(tf, cv), al = tf.alignment || 0;
+  const k0 = fitScale(tf, cv);
+  let sx = tf.scaleX, sy = tf.scaleY;
+  if (tf.boundsType && tf.boundsType !== 'OBS_BOUNDS_NONE' && tf.boundsWidth && tf.boundsHeight) { sx = tf.boundsWidth / sw; sy = tf.boundsHeight / sh; }
+  const cl = tf.cropLeft || 0, crr = tf.cropRight || 0, ct = tf.cropTop || 0, cb = tf.cropBottom || 0;
+  const w = (sw - cl - crr) * sx, h = (sh - ct - cb) * sy;
+  const rot = tf.rotation || 0;
+  const [ax, ay] = anchorOff(al, w, h), [rx, ry] = rotate(ax, ay, rot);
+  const vcx = tf.positionX - rx, vcy = tf.positionY - ry;
+  const bcx = vcx - ((cl - crr) * sx) / 2, bcy = vcy - ((ct - cb) * sy) / 2;
+  let tw = -rot; tw = ((tw % 360) + 360) % 360; if (tw > 180) tw -= 360;
+  return { size: sx / k0 * 100, x: (bcx - cv.cw / 2) / cv.cw * XY_RANGE, y: (cv.ch / 2 - bcy) / cv.ch * XY_RANGE, tw,
+    crop: [crr / sw * CROP_UNITS[0], cl / sw * CROP_UNITS[1], ct / sh * CROP_UNITS[2], cb / sh * CROP_UNITS[3]] };
+}
+// Modell -> OBS (entprellt, die letzte Vorgabe gewinnt)
+const tftApply = { pend: null, timer: null, running: false, warnedBounds: false };
+function setKey(i, m, pstCode) {
+  if (!JOY_ON || !ready) return;
+  tftApply.pend = { i, m: { size: m.size, x: m.x, y: m.y, tw: m.tw, crop: m.crop.slice() }, pst: pstCode };
+  if (!tftApply.timer && !tftApply.running) tftApply.timer = setTimeout(tftRun, 50);
+}
+async function tftRun() {
+  tftApply.timer = null;
+  const p = tftApply.pend; if (!p) return;
+  tftApply.pend = null; tftApply.running = true;
+  try {
+    const scene = sceneOf(p.pst); if (!scene) return;
+    const t = await joyTarget(scene, p.i);
+    if (!t) { log(`[TFT] Key${p.i + 1}: in "${scene}" gibt es keine ${p.i + 1}. Quelle`); return; }
+    const cv = await getCanvas();
+    if (t.tf.boundsType && t.tf.boundsType !== 'OBS_BOUNDS_NONE' && !tftApply.warnedBounds) {
+      tftApply.warnedBounds = true; log(`[TFT] "${t.name}" hat eine Begrenzungsbox - wird auf "Keine Begrenzung" gestellt`); }
+    const set = mapToObs(p.m, t.tf, cv);
+    await request('SetSceneItemTransform', { sceneName: scene, sceneItemId: t.id, sceneItemTransform: set });
+    Object.assign(joyState, { scene, id: t.id, name: t.name, tf: null, last: 0 });
+    tftApply.lastSet = Date.now();
+  } finally {
+    tftApply.running = false;
+    if (tftApply.pend && !tftApply.timer) tftApply.timer = setTimeout(tftRun, 50);
+  }
+}
+// OBS -> Modell: liefert { size,x,y,tw,crop, opac?, lumaMin?, lumaSmooth?, name } oder null
+async function readKey(i, pstCode) {
+  if (!ready) return null;
+  const scene = sceneOf(pstCode); if (!scene) return null;
+  const t = await joyTarget(scene, i); if (!t) return null;
+  const cv = await getCanvas();
+  const m = mapFromObs(t.tf, cv); m.name = t.name; m.scene = scene;
+  const f = kf.get(t.name);
+  if (f && f.opacOk) m.opac = f.opac; else {
+    const g = await requestRaw('GetSourceFilter', { sourceName: t.name, filterName: F_OPAC });
+    if (g.ok && g.data.filterSettings && g.data.filterSettings.opacity != null) m.opac = g.data.filterSettings.opacity;
+  }
+  const g2 = (f && f.luma) ? null : await requestRaw('GetSourceFilter', { sourceName: t.name, filterName: F_LUMA });
+  if (f && f.luma) { m.lumaMin = f.lumaMin; m.lumaSmooth = f.lumaSmooth; }
+  else if (g2 && g2.ok && g2.data.filterSettings) { m.lumaMin = g2.data.filterSettings.luma_min || 0; m.lumaSmooth = g2.data.filterSettings.luma_min_smooth || 0; }
+  return m;
+}
+
 // ---------------- Wipes (Panel) -> OBS-Uebergang "Wischen" (Luma Wipe) ----------------
 // Panel-Transitions-Typ (Bkgd): 01 = Mix -> Ueberblenden, 02 = Wipe 1, 03 = Wipe 2 -> Luma Wipe.
 // Panel-Pattern-Nummer -> Luma-Bild ueber Tabelle in kayak-wipes.json (gleicher Ordner), sonst Standardtabelle.
@@ -430,10 +537,11 @@ const WIPES = (() => {
     return Object.assign(def, j, { patterns: Object.assign({}, j.patterns || def.patterns) });
   } catch (e) { return def; }
 })();
-const wipeState = { type: 1, pattern: { 1: 1, 2: 1 }, rev: false, manual: false, flip: false };
+const wipeState = { type: 1, pattern: { 1: 1, 2: 1 }, rev: false };
 // Normal/Reverse (v5e): nach jedem Wipe wird "Umkehren" automatisch umgeschaltet -> der naechste Wipe laeuft
 // als Rueckweg (z. B. Iris auf -> Iris zu). Wechsel von Muster oder Typ beginnt wieder "normal".
-// v5v: FlipFlop jetzt am Panel (Pattern Direction); "nr" in kayak-wipes.json und KAYAK_WIPE_NR entfallen.
+// Aus: "nr": false in kayak-wipes.json oder $env:KAYAK_WIPE_NR="0".
+const WIPE_NR = process.env.KAYAK_WIPE_NR !== '0' && WIPES.nr !== false;
 function lumaFor(pat) { return WIPES.patterns[pat] || WIPES.patterns[String(pat)] || WIPES.fallback; }
 function wipeRequests() {
   if (wipeState.type !== 2 && wipeState.type !== 3) return null;
@@ -441,27 +549,13 @@ function wipeRequests() {
   const pat = wipeState.pattern[wipeState.type - 1];
   return [['SetCurrentSceneTransition', { transitionName: st.wipeName }],
           ['SetCurrentSceneTransitionSettings', { transitionSettings: { luma_image: lumaFor(pat),
-            luma_softness: WIPES.softness, luma_invert: !!WIPES.invert !== (wipeState.manual !== (wipeState.flip && wipeState.rev)) }, overlay: true }]];
+            luma_softness: WIPES.softness, luma_invert: !!WIPES.invert !== (WIPE_NR && wipeState.rev) }, overlay: true }]];
 }
 // nach einem ausgeloesten Wipe fuer den naechsten umschalten
 function wipeDone() {
-  if (!wipeState.flip || (wipeState.type !== 2 && wipeState.type !== 3) || !st.wipeName) return;
+  if (!WIPE_NR || (wipeState.type !== 2 && wipeState.type !== 3) || !st.wipeName) return;
   wipeState.rev = !wipeState.rev;
   log(`[OBS] Naechster Wipe: ${wipeState.rev ? 'umgekehrt (Rueckweg)' : 'normal'}`);
-}
-// Pattern Direction vom Panel (v5v): 53 00 = Normal, 53 01 = Reverse, 54 01 = FlipFlop (nach jedem Wipe automatisch Rueckweg).
-// Das Panel meldet den gewaehlten Zustand selbst, wir muessen nichts mitzaehlen.
-function wipeDirection(what, on) {
-  if (what === 'rev') { wipeState.manual = !!on; wipeState.flip = false; }
-  else { wipeState.flip = !!on; wipeState.manual = false; }
-  wipeState.rev = false;
-  log(`[OBS] Pattern Direction: ${wipeState.flip ? 'FlipFlop' : wipeState.manual ? 'Reverse' : 'Normal'}`);
-}
-// Softness-Regler vom Panel (v5v) -> luma_softness, gilt ab dem naechsten Wipe. Schritt: $env:KAYAK_SOFT_STEP (0.01)
-const SOFT_STEP = parseFloat(process.env.KAYAK_SOFT_STEP || '0.01');
-function wipeSoftness(steps) {
-  WIPES.softness = Math.max(0, Math.min(1, WIPES.softness + steps * SOFT_STEP));
-  log(`[OBS] Wipe-Softness ${Math.round(WIPES.softness * 100)} %`);
 }
 function setTransType(typ) {
   if (typ !== wipeState.type) wipeState.rev = false;
@@ -514,7 +608,7 @@ function kfFlush(src) {
     filterSettings: { luma_min: f.lumaMin, luma_min_smooth: f.lumaSmooth }, overlay: true });
   f.dirty.clear();
 }
-async function keyFilter(i, kind, val, pstCode) {
+async function keyFilter(i, kind, val, pstCode, abs) {
   if (!ready) return;
   const scene = sceneOf(pstCode); if (!scene) return;
   if (joySel.idx !== i) joySel.idx = i;
@@ -536,9 +630,10 @@ async function keyFilter(i, kind, val, pstCode) {
       .then(st2 => { f.lumaMin = st2.luma_min || 0; f.lumaSmooth = st2.luma_min_smooth || 0; });
   }
   await (kind === 'opac' ? f.readyOpac : f.readyLuma);
-  if (kind === 'opac') { f.opac = clamp01(f.opac + val * OPAC_STEP); f.dirty.add('opac'); }
-  else if (kind === 'clip') { f.lumaMin = clamp01(f.lumaMin + val * LUMA_STEP); f.dirty.add('luma'); }
-  else if (kind === 'gain') { f.lumaSmooth = clamp01(f.lumaSmooth - val * LUMA_STEP, 0.5); f.dirty.add('luma'); }
+  // abs (v5z): Absolutwert in OBS-Einheiten (Opacity 0..1, Clip = luma_min 0..1, Gain = luma_min_smooth 0..0.5)
+  if (kind === 'opac') { f.opac = clamp01(abs !== undefined ? abs : f.opac + val * OPAC_STEP); f.dirty.add('opac'); }
+  else if (kind === 'clip') { f.lumaMin = clamp01(abs !== undefined ? abs : f.lumaMin + val * LUMA_STEP); f.dirty.add('luma'); }
+  else if (kind === 'gain') { f.lumaSmooth = clamp01(abs !== undefined ? abs : f.lumaSmooth - val * LUMA_STEP, 0.5); f.dirty.add('luma'); }
   if (!f.timer) f.timer = setTimeout(() => kfFlush(src), 60);
   const now = Date.now();
   if (!f.lastLog || now - f.lastLog > 800) { f.lastLog = now;
@@ -694,5 +789,5 @@ function init(logger, h) {
   connect();
 }
 
-module.exports = { wipeDirection, wipeSoftness, mePreview, meProgram, meSwitch, meSources, meSwitcher, keyFilter, selectItem, black, joyReset, ftb, setTransType, setWipePattern, joy, assMessage, emem, sceneNo, init, preview, program, cut, auto, setDuration, tbar, tbarEnd, tbarAbort,
+module.exports = { mePreview, meProgram, meSwitch, meSources, meSwitcher, keyFilter, selectItem, setKey, readKey, mapToObs, mapFromObs, black, joyReset, ftb, setTransType, setWipePattern, joy, assMessage, emem, sceneNo, init, preview, program, cut, auto, setDuration, tbar, tbarEnd, tbarAbort,
   keySource, keySwitch, sceneOf, state: st, isReady: () => ready };
