@@ -13,6 +13,13 @@
 // KAYAK SOFT-FRAME v5i (12.10.2026): KAYAK_CFG31 ersetzt die Tabelle auch im Multicast-Anfangsstrom
 // KAYAK SOFT-FRAME v5h (12.10.2026): KAYAK_CFG31 fuer die ganze Tabelle; Schalter 25-28 = M/E 0-3 vorhanden, 29 = Anzahl M/Es (unteres Halbbyte)
 // KAYAK SOFT-FRAME v5g (12.10.2026): Versuchsmodus Systemtabelle 30 01 31 (KAYAK_CFG31) - M/E-Boards?
+// KAYAK SOFT-FRAME v5zd (24.10.2026): Save/Load nutzt den gemeldeten Applikationsnamen (KAYAK_APPNAME) statt fest 20230203 DUPLEX1-NORM
+// KAYAK SOFT-FRAME v5zc (24.10.2026): VERSUCH M/E-Tally (PGM rot) - nur mit $env:KAYAK_ME_TALLY=1 oder 2, sonst wie v5zb
+// KAYAK SOFT-FRAME v5zb (24.10.2026): Empfindlichkeit der Encoder einstellbar (KAYAK_GAIN_SIZE/XY/TWIST/CROP, Standard 1/1/1/0.25)
+// KAYAK SOFT-FRAME v5za (24.10.2026): Clip Low = Luma Min, Clip Hi = Luma Max im OBS-Filter "Kayak Luma" (statt Glaettung); sonst wie v5z
+// KAYAK SOFT-FRAME v5z (24.10.2026): TFT-Werte absolut + proportional nach OBS (Size 100 = ganze Leinwand, X/Y +-100 = +-Leinwand,
+//   Crop +-16/+-9 = ganze Quelle, Twist = Drehung) und Rueckmeldung OBS -> TFT (beim Delegieren + Abfrage alle 1 s). Braucht kayak-obs-standard.js v5z.
+//   Abfrage-Intervall: $env:KAYAK_TFT_POLL (ms, Standard 1000, 0 = aus)
 // KAYAK SOFT-FRAME v5y (23.10.2026): + Twist-Wert (Z) im TFT
 // KAYAK SOFT-FRAME v5x (23.10.2026): Save/Load Application wie der echte Frame (Frame schreibt/liest per TFTP im Panel)
 // KAYAK SOFT-FRAME v5w (23.10.2026): TFT-Zahlenwerte (Locate/Size/Crop/Opacity/Clip) wie der echte Frame, Zifferneingabe
@@ -336,7 +343,7 @@ function patchTally(buf) {
   let i = buf.indexOf(TALLY_HDR);
   while (i !== -1) {
     const b = i + 2, n = buf[b + 4];
-    const body = tallyBody(n);
+    const body = n <= 2 ? tallyBody(n) : null;   // v5zc: Bloecke > 2 sind M/E-Versuch, nicht anfassen
     if (body && b + body.length <= buf.length) body.copy(buf, b);
     i = buf.indexOf(TALLY_HDR, i + 1);
   }
@@ -569,6 +576,11 @@ function w16(v) { const b = Buffer.alloc(2); b.writeUInt16LE(v & 0xffff); return
 // Crop-Bereich am echten Frame (Angabe 23.10.): rechts/links +-16, oben/unten +-9 (16:9)
 const CROP_MAX = [16, 16, 9, 9];
 function cropClamp(idx, v) { return Math.max(-CROP_MAX[idx], Math.min(CROP_MAX[idx], v)); }
+const SIZE_LIM = [1, 400], XY_LIM = parseFloat(process.env.KAYAK_XY_RANGE || '100');
+function lim(v, a, b) { return Math.max(a, Math.min(b, v)); }
+let lastPanelInput = 0;
+function kvApply(key) { lastPanelInput = Date.now(); OBS.setKey(key, KV[key], mix.pst); }
+function kvNorm(s) { s.size = lim(s.size, ...SIZE_LIM); s.x = lim(s.x, -XY_LIM, XY_LIM); s.y = lim(s.y, -XY_LIM, XY_LIM); s.tw = lim(s.tw, -3600, 3600); }
 function kvClamp(v) { return Math.max(0, Math.min(4096, Math.round(v))); }
 function kvLocateRecs(i) {
   const s = KV[i], a = Buffer.alloc(44); a[1] = 0xa1 + i; a[2] = 0x02;
@@ -610,11 +622,15 @@ function kvSend(i, part) {
   }, 40);
 }
 function kvSendAll(i) { for (const p of ['loc', 'crop', 'opac', 'clip']) kvSend(i, p); }
+// Encoder-Empfindlichkeit (Faktor auf die Panel-Schritte; die Beschleunigung macht das Panel selbst)
+const GAIN = { size: parseFloat(process.env.KAYAK_GAIN_SIZE || '1'), xy: parseFloat(process.env.KAYAK_GAIN_XY || '1'),
+  tw: parseFloat(process.env.KAYAK_GAIN_TWIST || '1'), crop: parseFloat(process.env.KAYAK_GAIN_CROP || '0.25') };
 function kvEncoder(key, sub, axis, v) {   // Drehgeber-Delta (1/1024 Einheit)
-  const s = KV[key], d = v / KV_UNIT;
+  const s = KV[key], d0 = v / KV_UNIT;
+  const d = d0 * (sub === 0x02 ? (axis === 1 ? GAIN.size : axis === 4 ? GAIN.tw : GAIN.xy) : GAIN.crop);
   if (sub === 0x02) {
     if (axis === 1) s.size += d; else if (axis === 2) s.x += d; else if (axis === 3) s.y += d; else if (axis === 4) s.tw += d; else return;
-    kvSend(key, 'loc');
+    kvNorm(s); kvSend(key, 'loc');
   } else if (sub === 0x29 && axis >= 6 && axis <= 9) { s.crop[axis - 6] = cropClamp(axis - 6, s.crop[axis - 6] + d); kvSend(key, 'crop'); }
 }
 function kvKeyer(key, id, v, absolute) {  // Opacity / Clip; liefert Delta zurueck
@@ -626,6 +642,47 @@ function kvKeyer(key, id, v, absolute) {  // Opacity / Clip; liefert Delta zurue
   kvSend(key, part);
   return (id === 0x0d ? s.opac : HI_IDS.includes(id) ? s.hi : s.lo) - old;
 }
+// Modell -> OBS-Filterwerte (Opacity 0..1, Clip Low = luma_min, Clip Hi = luma_max; Panel-Prozent 0..100 = 0..1)
+function kvObsVal(key, kind) {
+  const s = KV[key];
+  if (kind === 'opac') return lim(s.opac / 4096, 0, 1);
+  if (kind === 'clip') return lim((-200 + s.lo / 4096 * 400) / 100, 0, 1);
+  return lim((-100 + s.hi / 4096 * 400) / 100, 0, 1);
+}
+function kvKeyOut(key, kind) { lastPanelInput = Date.now(); OBS.keyFilter(key, kind, 0, mix.pst, kvObsVal(key, kind)); }
+// OBS -> TFT: Modell aus OBS lesen. force = alles uebernehmen (beim Delegieren), sonst nur Abweichungen (Abfrage)
+let kvPulling = false;
+async function kvPull(i, force) {
+  if (!TFT_FB || !connected || kvPulling) return false;
+  kvPulling = true;
+  try {
+    const m = await OBS.readKey(i, mix.pst); if (!m) return false;
+    if (i !== keyDelIdx) return false;
+    const s = KV[i], parts = new Set();
+    const neq = (a, b, t) => Math.abs(a - b) > t;
+    if (force || neq(s.size, lim(m.size, ...SIZE_LIM), 0.05) || neq(s.x, m.x, 0.02) || neq(s.y, m.y, 0.02) || neq(s.tw, m.tw, 0.1)) {
+      s.size = m.size; s.x = m.x; s.y = m.y; s.tw = m.tw; kvNorm(s); parts.add('loc'); }
+    for (let n = 0; n < 4; n++) {
+      const mo = Math.max(0, s.crop[n]);          // negatives Crop gibt es in OBS nicht (= 0)
+      if (force || neq(mo, m.crop[n], 0.02)) { s.crop[n] = cropClamp(n, m.crop[n]); parts.add('crop'); }
+    }
+    if (force && m.opac == null) s.opac = 4096;
+    if (force && m.lumaMin == null) { s.lo = 2048; s.hi = 2048; }
+    if (m.opac != null && (force || neq(s.opac / 4096, m.opac, 0.003))) { s.opac = kvClamp(m.opac * 4096); parts.add('opac'); }
+    if (m.lumaMin != null) {
+      const lo = (-200 + s.lo / 4096 * 400) / 100;
+      if (force || (lo > 0 ? neq(lo, m.lumaMin, 0.003) : m.lumaMin > 0.003)) { s.lo = kvClamp((m.lumaMin * 100 + 200) / 400 * 4096); parts.add('clip'); }
+      const hi = kvObsVal(i, 'gain');
+      if (force || (hi < 1 ? neq(hi, m.lumaMax, 0.003) : m.lumaMax < 0.997)) { s.hi = kvClamp((m.lumaMax * 100 + 100) / 400 * 4096); parts.add('clip'); }
+    }
+    if (force) for (const p of ['loc', 'crop', 'opac', 'clip']) parts.add(p);
+    for (const p of parts) kvSend(i, p);
+    if (parts.size && !force) log(`[TFT] Key${i + 1} aus OBS uebernommen (${[...parts].join(', ')}): Size ${s.size.toFixed(1)}, X ${s.x.toFixed(1)}, Y ${s.y.toFixed(1)}, Twist ${s.tw.toFixed(1)}`);
+    return true;
+  } finally { kvPulling = false; }
+}
+const TFT_POLL = parseInt(process.env.KAYAK_TFT_POLL || '1000', 10);
+if (TFT_FB && TFT_POLL > 0) setInterval(() => { if (connected && Date.now() - lastPanelInput > 1500) kvPull(keyDelIdx, false).catch(() => {}); }, TFT_POLL);
 let keyReqTimer = null;
 // Delegate Key 1 schickt KEIN a0 26 (Log 08.10.), nur die Abfrage-Salve 05 00 24 00 [Gruppe] 50 fuer die
 // drei NICHT delegierten Keys. Die fehlende Gruppe = neu delegierter Key (gilt auch fuer Key 2..4).
@@ -636,7 +693,7 @@ function setDelegate(i, how) {
   const changed = i !== keyDelIdx; keyDelIdx = i;
   if (changed || how === 'a026') log(`[KEY] Delegate Key${i + 1}${how === 'abfrage' ? ' (aus Abfrage erkannt)' : how === 'regler' ? ' (aus Regler erkannt)' : ''}`);
   OBS.selectItem(i, mix.pst);
-  if (changed && process.env.KAYAK_TFT_ONDELEGATE !== '0') kvSendAll(i);
+  if (changed && process.env.KAYAK_TFT_ONDELEGATE !== '0') { kvSendAll(i); kvPull(i, true).catch(() => {}); }
 }
 function onKeyRequest(g, sub) {
   if (sub === 0x50) keyReqGroups.add(g);
@@ -757,10 +814,27 @@ function meLever(me, v) {
   }
 }
 // v5o: Bus-Lampen der M/E zurueckmelden - wie bei P/P (Satz 00 01 01/02 [Code]), nur mit M/E-Nummer vorne
+// v5zc: VERSUCH M/E-Tally (kein Mitschnitt vorhanden, geraten!). KAYAK_ME_TALLY=1: wie P/P-Bloecke 0..2, aber mit M/E-Nummer im
+// Byte vor der "02" (Annahme: dort steht die Ebene, P/P = 0). KAYAK_ME_TALLY=2: Bloecke 3..11 (3 pro M/E) ohne Ebenenbyte.
+const ME_TALLY = parseInt(process.env.KAYAK_ME_TALLY || '0', 10);
+function meTallyBody(me, n) {
+  const m = meSt[me], code = (n === 2 ? m.pstC : m.pgmC) || 0, mask = srcMask(code);
+  let b;
+  if (n === 1) b = Buffer.from(D.tally_n1_zero, 'hex');
+  else {
+    const hex = n === 0 ? (mask ? D.tally_tpl_src[0] : D.tally_n0_v3f) : (mask ? D.tally_tpl_src : D.tally_tpl_none)[2];
+    if (!hex) return null;
+    b = Buffer.from(hex, 'hex'); b.writeUInt32LE(mask, 5); b[28] = 0; b[44] = 0;
+  }
+  if (ME_TALLY === 1) { b[2] = me; b[4] = n; } else { b[4] = 3 * me + n; }
+  return b;
+}
 function meBusLamps(me) {
   const m = meSt[me], r = [];
+  if (ME_TALLY) for (const n of [0, 1, 2]) { const t = meTallyBody(me, n); if (t) r.push(Buffer.concat([Buffer.from([0x9f, 0x44]), t])); }
   if (m.pgmC !== undefined) r.push(rec(hex2(me) + '0101' + hex2(m.pgmC) + '000000'));
   if (m.pstC !== undefined) r.push(rec(hex2(me) + '0102' + hex2(m.pstC) + '000000'));
+  if (ME_TALLY) log(`[M/E] M/E${me} Tally-Versuch Modus ${ME_TALLY}: PGM-Taste ${m.pgmC}, PST-Taste ${m.pstC}`);
   if (r.length && process.env.KAYAK_ME_LAMPS !== '0') sendMc(packet(r), '239.168.5.60');
 }
 // v5v: Persoenliche Einstellungen des Panels setzen (wie das Sidepanel, Mitschnitt Siedepanel2 14.10.):
@@ -862,11 +936,11 @@ function handleKey(msg, rinfo) {
       const key = msg[4] - 0x20;
       if (key !== keyDelIdx) setDelegate(key, 'regler');
       kvKeyer(key, msg[5], msg.readInt16LE(6), false);
-      OBS.keyFilter(key, kind, msg.readInt16LE(6), mix.pst); return true;
+      kvKeyOut(key, kind); return true;
     }
   }
   if (msg.length === 8 && msg[2] === 0xc5 && msg[3] === 0x00 && [0x14, 0x15, 0x17].includes(msg[5])) {
-    OBS.joy(msg[4], msg[5], msg.readInt16LE(6), mix.pst); return true;
+    lastPanelInput = Date.now() - 500; OBS.joy(msg[4], msg[5], msg.readInt16LE(6), mix.pst); return true;
   }
   // Joystick, 2. Format (z. B. im PST-/Key-Bereich delegiert, Log 07.10.):
   // 07 00 46 00 [Gruppe a1] [02] [Achse 02=X, 03=Y, 04=Twist] [int16]; Schritte +-2 (Twist bis +-10),
@@ -884,9 +958,10 @@ function handleKey(msg, rinfo) {
     const cur = sub === 0x02 ? [null, s.size, s.x, s.y, s.tw][axis] : (axis >= 6 && axis <= 9 ? s.crop[axis - 6] : null);
     if (cur != null && Number.isFinite(f)) {
       log(`[TFT] Key${key + 1} ${sub === 0x02 ? ['', 'Size', 'X', 'Y', 'Twist'][axis] : 'Crop ' + ['rechts', 'links', 'oben', 'unten'][axis - 6]} = ${f}`);
-      regler46(key, sub, axis, Math.round((f - cur) * KV_UNIT));
-      if (sub === 0x02) { if (axis === 1) s.size = f; else if (axis === 2) s.x = f; else if (axis === 3) s.y = f; else s.tw = f; kvSend(key, 'loc'); }
+      if (key !== keyDelIdx) setDelegate(key, 'regler');
+      if (sub === 0x02) { if (axis === 1) s.size = f; else if (axis === 2) s.x = f; else if (axis === 3) s.y = f; else s.tw = f; kvNorm(s); kvSend(key, 'loc'); }
       else { s.crop[axis - 6] = cropClamp(axis - 6, f); kvSend(key, 'crop'); }
+      kvApply(key);
       return true;
     }
   }
@@ -896,7 +971,7 @@ function handleKey(msg, rinfo) {
     const kind = id === 0x0d ? 'opac' : HI_IDS.includes(id) ? 'gain' : 'clip';
     log(`[TFT] Key${key + 1} ${kind === 'opac' ? 'Opacity' : kind === 'gain' ? 'Clip Hi' : 'Clip Low'} = ${msg.readUInt16LE(6)} (Delta ${d})`);
     if (key !== keyDelIdx) setDelegate(key, 'regler');
-    if (d) OBS.keyFilter(key, kind, d, mix.pst);
+    kvKeyOut(key, kind);
     return true;
   }
   // noch unbekannte Regler/Joystick-Varianten einmal pro Muster melden
@@ -921,14 +996,18 @@ function handleKey(msg, rinfo) {
 
 // v5w: Drehgeber Locate/Size/Crop -> Modell (TFT-Rueckmeldung) + OBS
 function regler46(key, sub, axis, v) {
-  let ax = null, val = v;
-  if (sub === 0x02 && axis === 0x01) ax = 0x30;
-  else if (sub === 0x02 && axis >= 0x02 && axis <= 0x04) { ax = { 2: 0x14, 3: 0x15, 4: 0x17 }[axis]; val = v / 2; if (ax === 0x17) val = -val; }
-  else if (sub === 0x29 && axis >= 0x06 && axis <= 0x09) ax = 0x41 + (axis - 6);
-  if (ax === null) return false;
+  if (sub === 0x02 && axis >= 0x02 && axis <= 0x04 && Math.abs(v) < 100) {
+    // Joystick (kleine Schritte +-2, Twist bis +-10): wie bisher relativ in OBS; das TFT folgt ueber die Abfrage
+    const ax = { 2: 0x14, 3: 0x15, 4: 0x17 }[axis]; let val = v / 2; if (ax === 0x17) val = -val;
+    if (key !== keyDelIdx) setDelegate(key, 'regler');
+    lastPanelInput = Date.now() - 500;
+    OBS.joy(0xa1 + key, ax, val, mix.pst);
+    return true;
+  }
+  if (!((sub === 0x02 && axis >= 0x01 && axis <= 0x04) || (sub === 0x29 && axis >= 0x06 && axis <= 0x09))) return false;
   if (key !== keyDelIdx) setDelegate(key, 'regler');
   kvEncoder(key, sub, axis, v);
-  OBS.joy(0xa1 + key, ax, val, mix.pst);
+  kvApply(key);
   return true;
 }
 
@@ -943,7 +1022,7 @@ function regler46(key, sub, axis, v) {
 // Inhalt der Frame-Dateien: devices.ini/appli.ini/state.bin aus unseren TFTP-Dateien, alle anderen leer (Soft-Frame hat keine).
 // Abschalten: KAYAK_SAVELOAD=0
 const SAVELOAD = process.env.KAYAK_SAVELOAD !== '0';
-const APP = { name: '20230203 DUPLEX1-NORM', path: '/bd/appli/20230203 DUPLEX1-NORM' };
+const APP = { name: APP_NAME, path: '/bd/appli/' + APP_NAME };   // v5zd: gleicher Name wie der gemeldete Applikationsname (KAYAK_APPNAME)
 let appBusy = false;
 function ipBuf(ip) { return Buffer.from(ip.split('.').map(Number)); }
 function strL(s) { const b = Buffer.from(s, 'latin1'); return Buffer.concat([Buffer.from([b.length]), b]); }
