@@ -19,7 +19,7 @@
 
 const crypto = require('crypto');
 
-const URL = process.env.KAYAK_OBS_URL || 'ws://192.168.5.60:4455';
+const URL = process.env.KAYAK_OBS_URL || 'ws://192.168.5.100:4455';
 const PASS = process.env.KAYAK_OBS_PASS || '';
 const ENABLED = process.env.KAYAK_OBS !== '0';
 const MAX_SCENES = parseInt(process.env.KAYAK_OBS_SCENES || '30', 10);   // 15 Tasten x 2 (mit Shift)
@@ -92,6 +92,19 @@ function sceneNo(code) {
   return (code >= 1 && code <= 24) ? code : 0;
 }
 function sceneOf(code) { const n = sceneNo(code); return (n >= 1 && n <= st.scenes.length) ? st.scenes[n - 1] : null; }
+// v6a: Rueckmeldung OBS -> Panel (nur P/P): Szenenname -> Tastencode und aktuelle Programm-/Vorschau-Szene lesen
+function codeOf(name) {
+  if (!name) return -1;
+  for (let c = 1; c <= 24; c++) if (sceneOf(c) === name) return c;
+  for (const c of Object.keys(EXTRA)) if (sceneOf(parseInt(c, 10)) === name) return parseInt(c, 10);
+  return -1;
+}
+async function readMix() {
+  const p = await requestRaw('GetCurrentProgramScene');
+  const v = await requestRaw('GetCurrentPreviewScene');
+  const nm = (r) => r.ok ? (r.data.currentProgramSceneName || r.data.currentPreviewSceneName || r.data.sceneName || null) : null;
+  return { pgm: nm(p), pst: nm(v) };
+}
 function clampMs(ms) { return Math.max(50, Math.min(20000, Math.round(ms))); }
 
 async function setup() {
@@ -177,11 +190,14 @@ function connect() {
       }
     } else if (msg.op === 5) {                // Event
       if (d.eventType === 'SceneTransitionVideoEnded' || d.eventType === 'SceneTransitionEnded') {
+        if (hooks.onObsMix) hooks.onObsMix(d.eventType);
         if (st.pendingPreview) { const p = st.pendingPreview; st.pendingPreview = null;
           setTimeout(() => request('SetCurrentPreviewScene', { sceneName: p }), 50); }
       } else if (d.eventType === 'VendorEvent' && d.eventData && d.eventData.vendorName === 'AdvancedSceneSwitcher') {
         const m = d.eventData.eventData && d.eventData.eventData.message;
         if (m !== undefined) { log(`[ASS] Meldung von OBS: ${m}`); if (hooks.onAssMessage) hooks.onAssMessage(String(m)); }
+      } else if (d.eventType === 'CurrentProgramSceneChanged' || d.eventType === 'CurrentPreviewSceneChanged') {
+        if (hooks.onObsMix) hooks.onObsMix(d.eventType);
       } else if (d.eventType === 'SceneListChanged') {
         log('[OBS] Szenenliste geaendert – neu einlesen'); setup();
       }
@@ -502,7 +518,7 @@ async function tftRun() {
     if (tftApply.pend && !tftApply.timer) tftApply.timer = setTimeout(tftRun, 50);
   }
 }
-// OBS -> Modell: liefert { size,x,y,tw,crop, opac?, lumaMin?, lumaSmooth?, name } oder null
+// OBS -> Modell: liefert { size,x,y,tw,crop, opac?, lumaMin?, lumaMax?, name } oder null
 async function readKey(i, pstCode) {
   if (!ready) return null;
   const scene = sceneOf(pstCode); if (!scene) return null;
@@ -515,8 +531,8 @@ async function readKey(i, pstCode) {
     if (g.ok && g.data.filterSettings && g.data.filterSettings.opacity != null) m.opac = g.data.filterSettings.opacity;
   }
   const g2 = (f && f.luma) ? null : await requestRaw('GetSourceFilter', { sourceName: t.name, filterName: F_LUMA });
-  if (f && f.luma) { m.lumaMin = f.lumaMin; m.lumaSmooth = f.lumaSmooth; }
-  else if (g2 && g2.ok && g2.data.filterSettings) { m.lumaMin = g2.data.filterSettings.luma_min || 0; m.lumaSmooth = g2.data.filterSettings.luma_min_smooth || 0; }
+  if (f && f.luma) { m.lumaMin = f.lumaMin; m.lumaMax = f.lumaMax; }
+  else if (g2 && g2.ok && g2.data.filterSettings) { m.lumaMin = g2.data.filterSettings.luma_min || 0; m.lumaMax = g2.data.filterSettings.luma_max != null ? g2.data.filterSettings.luma_max : 1; }
   return m;
 }
 
@@ -587,12 +603,12 @@ function ftb() {
 // ---------------- Keyer-Encoder OPAC / GAIN / CLIP -> OBS-Filter (v5d) ----------------
 // Wirkt auf die Quelle des Keys (n-te von unten in PST). Filter haengen an der QUELLE (gilt in allen Szenen).
 //   OPAC -> Filter "Kayak Opacity" (Farbkorrektur, opacity 0..1)
-//   CLIP -> Filter "Kayak Luma" (Luma Key, luma_min = Schwelle), GAIN -> luma_min_smooth (mehr Gain = haerter)
+//   CLIP -> Filter "Kayak Luma" (Luma Key, luma_min = Schwelle), HI/GAIN -> luma_max (Clip Low = Luma Min, Clip Hi = Luma Max; Glaettung bleibt wie in OBS eingestellt)
 // Schritte: $env:KAYAK_OPAC_STEP (0.02), $env:KAYAK_LUMA_STEP (0.005)
 const OPAC_STEP = parseFloat(process.env.KAYAK_OPAC_STEP || '0.02');
 const LUMA_STEP = parseFloat(process.env.KAYAK_LUMA_STEP || '0.005');
 const F_OPAC = 'Kayak Opacity', F_LUMA = 'Kayak Luma';
-const kf = new Map();   // sourceName -> { ready: Promise, opac, lumaMin, lumaSmooth, dirty:Set, timer }
+const kf = new Map();   // sourceName -> { ready: Promise, opac, lumaMin, lumaMax, dirty:Set, timer }
 const clamp01 = (v, hi = 1) => Math.max(0, Math.min(hi, v));
 async function ensureFilter(src, name, kind, defaults) {
   const g = await requestRaw('GetSourceFilter', { sourceName: src, filterName: name });
@@ -605,7 +621,7 @@ function kfFlush(src) {
   const f = kf.get(src); if (!f) return; f.timer = null;
   if (f.dirty.has('opac')) request('SetSourceFilterSettings', { sourceName: src, filterName: F_OPAC, filterSettings: { opacity: f.opac }, overlay: true });
   if (f.dirty.has('luma')) request('SetSourceFilterSettings', { sourceName: src, filterName: F_LUMA,
-    filterSettings: { luma_min: f.lumaMin, luma_min_smooth: f.lumaSmooth }, overlay: true });
+    filterSettings: { luma_min: f.lumaMin, luma_max: f.lumaMax }, overlay: true });
   f.dirty.clear();
 }
 async function keyFilter(i, kind, val, pstCode, abs) {
@@ -617,7 +633,7 @@ async function keyFilter(i, kind, val, pstCode, abs) {
   const src = t.name;
   let f = kf.get(src);
   if (!f) {
-    f = { opac: 1, lumaMin: 0, lumaSmooth: 0, dirty: new Set(), timer: null, ready: null, luma: false, opacOk: false };
+    f = { opac: 1, lumaMin: 0, lumaMax: 1, dirty: new Set(), timer: null, ready: null, luma: false, opacOk: false };
     kf.set(src, f);
   }
   if (kind === 'opac' && !f.opacOk) {
@@ -627,17 +643,17 @@ async function keyFilter(i, kind, val, pstCode, abs) {
   if (kind !== 'opac' && !f.luma) {
     f.luma = true;
     f.readyLuma = ensureFilter(src, F_LUMA, 'luma_key_filter_v2', { luma_max: 1.0, luma_max_smooth: 0.0, luma_min: 0.0, luma_min_smooth: 0.0 })
-      .then(st2 => { f.lumaMin = st2.luma_min || 0; f.lumaSmooth = st2.luma_min_smooth || 0; });
+      .then(st2 => { f.lumaMin = st2.luma_min || 0; f.lumaMax = st2.luma_max != null ? st2.luma_max : 1; });
   }
   await (kind === 'opac' ? f.readyOpac : f.readyLuma);
-  // abs (v5z): Absolutwert in OBS-Einheiten (Opacity 0..1, Clip = luma_min 0..1, Gain = luma_min_smooth 0..0.5)
+  // abs (v5z): Absolutwert in OBS-Einheiten (Opacity 0..1, Clip = luma_min 0..1, Hi = luma_max 0..1)
   if (kind === 'opac') { f.opac = clamp01(abs !== undefined ? abs : f.opac + val * OPAC_STEP); f.dirty.add('opac'); }
   else if (kind === 'clip') { f.lumaMin = clamp01(abs !== undefined ? abs : f.lumaMin + val * LUMA_STEP); f.dirty.add('luma'); }
-  else if (kind === 'gain') { f.lumaSmooth = clamp01(abs !== undefined ? abs : f.lumaSmooth - val * LUMA_STEP, 0.5); f.dirty.add('luma'); }
+  else if (kind === 'gain') { f.lumaMax = clamp01(abs !== undefined ? abs : f.lumaMax + val * LUMA_STEP); f.dirty.add('luma'); }
   if (!f.timer) f.timer = setTimeout(() => kfFlush(src), 60);
   const now = Date.now();
   if (!f.lastLog || now - f.lastLog > 800) { f.lastLog = now;
-    log(`[KEYF] Key${i + 1} "${src}": Opacity ${Math.round(f.opac * 100)} %, Clip ${f.lumaMin.toFixed(3)}, Gain(Glaettung) ${f.lumaSmooth.toFixed(3)}`); }
+    log(`[KEYF] Key${i + 1} "${src}": Opacity ${Math.round(f.opac * 100)} %, Clip ${f.lumaMin.toFixed(3)}, Hi ${f.lumaMax.toFixed(3)}`); }
 }
 
 // ---------------- Ebene 7 (CUT/MIX) -> Schwarz ----------------
@@ -789,5 +805,5 @@ function init(logger, h) {
   connect();
 }
 
-module.exports = { mePreview, meProgram, meSwitch, meSources, meSwitcher, keyFilter, selectItem, setKey, readKey, mapToObs, mapFromObs, black, joyReset, ftb, setTransType, setWipePattern, joy, assMessage, emem, sceneNo, init, preview, program, cut, auto, setDuration, tbar, tbarEnd, tbarAbort,
+module.exports = { codeOf, readMix, mePreview, meProgram, meSwitch, meSources, meSwitcher, keyFilter, selectItem, setKey, readKey, mapToObs, mapFromObs, black, joyReset, ftb, setTransType, setWipePattern, joy, assMessage, emem, sceneNo, init, preview, program, cut, auto, setDuration, tbar, tbarEnd, tbarAbort,
   keySource, keySwitch, sceneOf, state: st, isReady: () => ready };

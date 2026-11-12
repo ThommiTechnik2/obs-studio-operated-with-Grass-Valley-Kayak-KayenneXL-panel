@@ -1,6 +1,6 @@
 # Kayak Soft-Frame – Projektstatus
 
-**Stand: Samstag, 24.10.2026 — FINALE VERSION v5zd (README EN/DE aktualisiert, Batterie/SSD-Tausch am Panel folgt) — v5zd (Save/Load mit gemeldetem App-Namen) auf v5zc (Versuch M/E-Tally, nur mit KAYAK_ME_TALLY) auf v5zb (Encoder-Empfindlichkeit) auf v5za (Clip Low/Hi = Luma Min/Max) auf v5z (TFT-Werte absolut/proportional nach OBS + Rückmeldung OBS → TFT; braucht das neue kayak-obs-standard.js). Vorher: 23.10. v5y (TFT-Zahlenwerte inkl. Twist + Save/Load Application), 14.10. v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
+**Stand: Donnerstag, 12.11.2026 — v6a (= v6 + Rückmeldung OBS → Panel für P/P, `KAYAK_OBS_FEEDBACK=1`, nur im Test mit simuliertem OBS). Stand 30.10.: v6 (= v5zd + Tasten-Beschriftung `kayak-labels.js`; Beschriftung noch nicht am Panel getestet). Stand 24.10.: FINALE VERSION v5zd (README EN/DE aktualisiert, Batterie/SSD-Tausch am Panel folgt) — v5zd (Save/Load mit gemeldetem App-Namen) auf v5zc (Versuch M/E-Tally, nur mit KAYAK_ME_TALLY) auf v5zb (Encoder-Empfindlichkeit) auf v5za (Clip Low/Hi = Luma Min/Max) auf v5z (TFT-Werte absolut/proportional nach OBS + Rückmeldung OBS → TFT; braucht das neue kayak-obs-standard.js). Vorher: 23.10. v5y (TFT-Zahlenwerte inkl. Twist + Save/Load Application), 14.10. v5v (Tastenklick aus). 12.10.: v5u + kayak-obs-standard.js. P/P und M/E1–3 laufen komplett mit OBS (am Panel bestätigt):
 M/E-Tasten, PST, CUT, AUTO, Hebel, Blendzeit über Source Switcher `M_E1_PGM`–`M_E3_PGM`, Vorschau über `M_E1_PVW`–`M_E3_PVW`
 (Multiview). M/E-Taste n = n-te Quelle der Switcher-Liste. M/E1–3 liegen auf P/P-Taste 13–15 (Szenen „M/E1–3“).
 Start: `node kayak-softframe-v5u.js` (M/Es per Standard an, `KAYAK_MES=3`; ersetzt `KAYAK_CFG31="26,27,28,29=84"`).
@@ -465,3 +465,17 @@ Lizenzen (96 Inputs) gestrichen: nicht nötig, das Soft-Frame meldet die Input-A
 - Immer nur eine Änderung pro Test (heute zweimal zwei Dinge gleichzeitig → Ursache nicht trennbar).
 - Arbeitsstand liegt im OneDrive/Windows-Ordner; GitHub nur zur Veröffentlichung
   (keine GV-/Arbeitgeber-Konfigurationsdateien ins öffentliche Repo).
+
+## 12. Tasten-Beschriftung (30.10.2026, v6, nur im Test mit simuliertem OBS)
+Idee: kleine Displays über den Tasten (wie bei Kayenne/Karrera: 3 Displays zu je 5 Tasten, nur Namen, kein Tally). `kayak-labels.js` (von v6 geladen) liefert die 15 Namen je Ebene:
+- Ebene: P/P = OBS-Szenenliste, M/E n = Liste des Source Switchers (`meSources`). Erkennung der Ebene aus der Panel-Abfrage nach dem Umschalten `05 00 24 [n] 20 13/84` (n: 1 = M/E2, 2 = M/E3, 3 = P/P; **0 = M/E1 ist nur vermutet**, deckt sich mit der Boot-Abfrage) und aus Bus-Tasten (Byte 3 = M/E-Nummer).
+- **Shift:** das Panel meldet die Shift-Taste nicht an den Frame (ShiftPST.pcapng: nur Tastencodes). Ausgabe enthält immer beide Ebenen (Tasten 1–15 und 16–30); `shift` nur beim Tastendruck erkannt.
+- Ausgabe: Testseite `http://127.0.0.1:8088/` (3 Displays à 5 Tasten, Ebene/Shift per Hand umschaltbar), `/labels.json`, `/events` (SSE), `/api/set?level=M/E2&shift=1`, optional UDP (`KAYAK_LABELS_UDP=host:port`). Umbruch `KAYAK_LABELS_COLS` (8) × `KAYAK_LABELS_LINES` (3), Kurznamen in `kayak-labels.json` (`{"Kamera 1":"Kam 1"}`).
+- Hardwareideen: ESP32 + 3 OLED-Streifen (z. B. 3,12", 256×64, SSD1322) oder 15 kleine OLEDs über Multiplexer, oder Raspberry Pi + Streifendisplay mit der Webseite. Zu messen am Panel: Tastenabstand, freie Höhe über den Tastenreihen, Platz hinter der Blende, Betrachtungswinkel.
+
+## 13. Rückmeldung OBS → Panel (12.11.2026, v6a, nur P/P)
+Anlass: Show-Automatisierung (CuePilot / LiveEdit schalten OBS per OSC) – das Panel soll trotzdem Tally zeigen. Nur P/P; die M/Es liegen verdeckt auf und werden nicht rückgemeldet (sinnvoll erst bei Panels mit mehreren M/Es gleichzeitig, z. B. Kayenne, Sony XR).
+- Schalter `KAYAK_OBS_FEEDBACK=1` (Standard aus, Panel bleibt führend wie bisher).
+- OBS-Modul meldet `CurrentProgramSceneChanged`, `CurrentPreviewSceneChanged`, `SceneTransitionEnded/VideoEnded`; Soft-Frame liest dann Programm/Vorschau (`readMix`), wandelt Szenenname → Tastencode (`codeOf`) und sendet Lampen + Tally (wie nach CUT).
+- Echo-Schutz: bei laufendem Übergang und `KAYAK_OBS_FEEDBACK_GUARD` (1500 ms) nach jeder Panel-Aktion wird nicht synchronisiert, danach einmal nachgezogen. Szene ohne Taste: Meldung im Log, PGM-Taste aus.
+- Offen: Übergangsanimation (Hebel/„PST rot“ während einer externen Blende) – bisher springen PGM/PST beim Wechsel; Verhalten der OBS-Ereignisse bei laufender Blende am echten Aufbau prüfen.

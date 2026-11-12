@@ -37,6 +37,8 @@ translated into OBS commands via obs-websocket v5.
 | Keyer knobs OPAC / CLIP LOW / CLIP HI (knob or typed) | OBS filters on that source: *Kayak Opacity* (opacity) and *Kayak Luma* (luma key, Luma Min / Max), created automatically |
 | Panel display values | Values are shown on the panel display and follow changes made in OBS |
 | Config → Application Control (Save / Load) | Works as on the real system |
+| Feedback OBS → panel (optional, P/P only) | If an automation (e.g. via OSC) switches program/preview in OBS, the panel follows: PGM red, PST lit |
+| Button labels (optional) | `kayak-labels.js` publishes the 15 button names per level (P/P, M/E1–3; scene or switcher list names) as a web page, JSON, event stream and UDP, e.g. for key displays driven by a Raspberry Pi or ESP32 |
 | Tally (P/P) | PGM red, PST lit, PST red during transitions, like on the real system |
 | **M/E 1–3** (delegation P/P, M/E1, M/E2, M/E3) | One **Source Switcher** per M/E (`M_E1_PGM` …): PGM bus = cut, PST bus = preview |
 | M/E CUT / AUTO / fader bar / rate | Cut, or the switcher's own transition with the rate set on the panel |
@@ -108,7 +110,8 @@ Once this data exists, the mainframe is no longer needed.
 
 | File | Purpose |
 |---|---|
-| `kayak-softframe-v5zd.js` | The soft-frame (handshake, file serving, mixer state, tally, panel buttons, display values, Save/Load) |
+| `kayak-softframe-v6a.js` | The soft-frame (handshake, file serving, mixer state, tally, panel buttons, display values, Save/Load) |
+| `kayak-labels.js` | Button labels output (test page, JSON, events, UDP); optional `kayak-labels.json` with short names |
 | `kayak-obs-standard.js` | Standard OBS link (obs-websocket v5, Downstream Keyer, Advanced Scene Switcher, Source Switcher, joystick, wipes, black) |
 | `kayak-obs-NAME.js` | Your own variant (optional), selected with `KAYAK_OBS_MODULE=NAME` |
 | `kayak-wipes.json` | Your table: panel wipe pattern number → OBS luma image |
@@ -121,12 +124,12 @@ Windows (PowerShell):
 cd "path\to\soft-frame"
 $env:KAYAK_OBS_URL  = "ws://192.168.5.100:4455"   # OBS computer (same computer: ws://127.0.0.1:4455)
 $env:KAYAK_OBS_PASS = "your-password"              # only if authentication is enabled in OBS
-node .\kayak-softframe-v5zd.js
+node .\kayak-softframe-v6a.js
 ```
 macOS / Linux:
 ```bash
 cd "path/to/soft-frame"
-KAYAK_OBS_URL=ws://127.0.0.1:4455 node kayak-softframe-v5zd.js
+KAYAK_OBS_URL=ws://127.0.0.1:4455 node kayak-softframe-v6a.js
 ```
 
 Then (re)start the panel. The log shows the handshake, the scene mapping (button 1–30 → OBS scene)
@@ -161,6 +164,10 @@ and the plugins that were found.
 | `KAYAK_GAIN_SIZE` / `_XY` / `_TWIST` / `_CROP` | `1` / `1` / `1` / `0.25` | Sensitivity of the knobs (factor on the panel's steps; the panel does the acceleration) |
 | `KAYAK_SAVELOAD` | on | `0` = no Save / Load support |
 | `KAYAK_KEYCLICK` / `KAYAK_BEEPER` | `off` / `keep` | Key click and beeper of the panel (`on` / `off` / `keep`) |
+| `KAYAK_OBS_FEEDBACK` | off | `1` = panel follows program/preview changes made in OBS (P/P only; echoes of the panel's own actions are ignored for 1.5 s, `KAYAK_OBS_FEEDBACK_GUARD`) |
+| `KAYAK_LABELS_PORT` | `8088` | Port of the labels page / data, `0` = off (open `http://127.0.0.1:8088/`; local network only) |
+| `KAYAK_LABELS_COLS` / `_LINES` | `8` / `3` | Characters per line and lines per key |
+| `KAYAK_LABELS_UDP` | – | `host:port`: also send labels as JSON over UDP |
 | `KAYAK_RAW` | – | `1` = log every panel message (troubleshooting) |
 
 ## Limitations
@@ -173,6 +180,7 @@ and the plugins that were found.
 - M/E bus lamps light up, but only in white, not in tally colours (no recording of a frame with M/Es was available).
 - Save / Load of the application works. Whether the panel keeps its settings after a restart with an empty backup battery is still being checked; a Load after boot may be needed.
 - Knobs for other keyer types (other Clip/Gain pairs) are not mapped yet.
+- Button labels: the panel does not report the Shift key to the frame, so the output always contains both levels (1–15 and 16–30); the active level is only detected when a bus key is pressed. The M/E1 detection is an assumption.
 
 ## Roadmap
 
@@ -224,6 +232,8 @@ Joystick werden über obs-websocket v5 in OBS-Befehle übersetzt.
 | Keyer-Regler OPAC / CLIP LOW / CLIP HI (Drehgeber oder eingetippt) | OBS-Filter an dieser Quelle: *Kayak Opacity* (Deckkraft) und *Kayak Luma* (Luma Key, Luma Min / Max), werden automatisch angelegt |
 | Werte im Panel-Display | Werte erscheinen im Panel-Display und folgen Änderungen in OBS |
 | Config → Application Control (Save / Load) | Funktioniert wie am echten System |
+| Rückmeldung OBS → Panel (optional, nur P/P) | Schaltet eine Automatisierung (z. B. per OSC) Programm/Vorschau in OBS, folgt das Panel: PGM rot, PST hell |
+| Tastenbeschriftung (optional) | `kayak-labels.js` stellt die 15 Tastennamen je Ebene (P/P, M/E1–3; Szenen- bzw. Switcher-Namen) als Webseite, JSON, Event-Stream und UDP bereit, z. B. für Tasten-Displays an einem Raspberry Pi oder ESP32 |
 | Tally (P/P) | PGM rot, PST hell, PST rot während der Blende, wie am echten System |
 | **M/E 1–3** (Delegation P/P, M/E1, M/E2, M/E3) | Je M/E ein **Source Switcher** (`M_E1_PGM` …): PGM-Bus = Schnitt, PST-Bus = Vorschau |
 | M/E CUT / AUTO / Blendenhebel / Blendzeit | Schnitt bzw. Übergang des Switchers mit der Blendzeit vom Panel |
@@ -296,7 +306,8 @@ Sind diese Daten einmal vorhanden, wird der Mainframe nicht mehr gebraucht.
 
 | Datei | Zweck |
 |---|---|
-| `kayak-softframe-v5zd.js` | Das Soft-Frame (Handshake, Dateiauslieferung, Mischer-Zustand, Tally, Panel-Tasten, Display-Werte, Save/Load) |
+| `kayak-softframe-v6a.js` | Das Soft-Frame (Handshake, Dateiauslieferung, Mischer-Zustand, Tally, Panel-Tasten, Display-Werte, Save/Load) |
+| `kayak-labels.js` | Ausgang für Tastenbeschriftung (Testseite, JSON, Events, UDP); optional `kayak-labels.json` mit Kurznamen |
 | `kayak-obs-standard.js` | Standard-OBS-Anbindung (obs-websocket v5, Downstream Keyer, Advanced Scene Switcher, Source Switcher, Joystick, Wipes, Black) |
 | `kayak-obs-NAME.js` | Eigene Variante (optional), Auswahl mit `KAYAK_OBS_MODULE=NAME` |
 | `kayak-wipes.json` | Deine Tabelle: Panel-Wipe-Muster → OBS-Luma-Bild |
@@ -309,12 +320,12 @@ Windows (PowerShell):
 cd "Pfad\zum\Soft-Frame"
 $env:KAYAK_OBS_URL  = "ws://192.168.5.100:4455"   # OBS-Rechner (gleicher Rechner: ws://127.0.0.1:4455)
 $env:KAYAK_OBS_PASS = "dein-passwort"              # nur falls in OBS Authentifizierung aktiv ist
-node .\kayak-softframe-v5zd.js
+node .\kayak-softframe-v6a.js
 ```
 macOS / Linux:
 ```bash
 cd "Pfad/zum/Soft-Frame"
-KAYAK_OBS_URL=ws://127.0.0.1:4455 node kayak-softframe-v5zd.js
+KAYAK_OBS_URL=ws://127.0.0.1:4455 node kayak-softframe-v6a.js
 ```
 
 Danach das Panel (neu) starten. Das Log zeigt den Handshake, die Szenen-Zuordnung (Taste 1–30 →
@@ -349,6 +360,10 @@ OBS-Szene) und die gefundenen Plugins.
 | `KAYAK_GAIN_SIZE` / `_XY` / `_TWIST` / `_CROP` | `1` / `1` / `1` / `0.25` | Empfindlichkeit der Drehgeber (Faktor auf die Panel-Schritte; die Beschleunigung macht das Panel) |
 | `KAYAK_SAVELOAD` | an | `0` = kein Save / Load |
 | `KAYAK_KEYCLICK` / `KAYAK_BEEPER` | `off` / `keep` | Tastenklick und Beeper des Panels (`on` / `off` / `keep`) |
+| `KAYAK_OBS_FEEDBACK` | aus | `1` = Panel folgt Programm-/Vorschau-Wechseln, die in OBS gemacht werden (nur P/P; Echo eigener Panel-Aktionen wird 1,5 s ignoriert, `KAYAK_OBS_FEEDBACK_GUARD`) |
+| `KAYAK_LABELS_PORT` | `8088` | Port der Beschriftungs-Seite / -Daten, `0` = aus (`http://127.0.0.1:8088/` öffnen; nur im lokalen Netz) |
+| `KAYAK_LABELS_COLS` / `_LINES` | `8` / `3` | Zeichen pro Zeile und Zeilen pro Taste |
+| `KAYAK_LABELS_UDP` | – | `host:port`: Beschriftung zusätzlich als JSON per UDP senden |
 | `KAYAK_RAW` | – | `1` = jede Panel-Meldung ins Log (Fehlersuche) |
 
 ## Grenzen
@@ -361,6 +376,7 @@ OBS-Szene) und die gefundenen Plugins.
 - Die M/E-Bustasten leuchten, aber nur weiß, nicht in Tally-Farben (es gab keinen Mitschnitt eines Frames mit M/Es).
 - Save / Load der Applikation funktioniert. Ob das Panel nach einem Neustart mit leerer Pufferbatterie seine Einstellungen behält, wird noch geprüft; nach dem Boot kann ein Load nötig sein.
 - Drehgeber anderer Keyer-Typen (andere Clip/Gain-Paare) sind noch nicht belegt.
+- Tastenbeschriftung: Das Panel meldet die Shift-Taste nicht an den Frame, die Ausgabe enthält deshalb immer beide Ebenen (1–15 und 16–30); die aktive Ebene wird nur beim Druck einer Bus-Taste erkannt. Die Erkennung von M/E1 ist eine Annahme.
 
 ## Ausblick
 
