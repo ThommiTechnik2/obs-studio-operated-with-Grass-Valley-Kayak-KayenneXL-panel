@@ -381,6 +381,4 @@ OBS-Szene) und die gefundenen Plugins.
 ## Ausblick
 
 - Tally-Farben für die M/E-Busse
-- JLCooper-/Contour-Controller und CasparCG
-- Druckbare Beschriftungsstreifen aus der OBS-Szenenliste
 - Einstellbarer Adressbereich für andere Studios
